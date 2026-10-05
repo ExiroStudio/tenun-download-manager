@@ -5137,6 +5137,7 @@ dependencies = [
  "tenun-test-server",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]

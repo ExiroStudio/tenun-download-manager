@@ -36,6 +36,14 @@ pub enum TenunError {
     /// File state was corrupted or incompatible.
     #[error("Corrupted state: {0}")]
     CorruptState(String),
+
+    /// Remote file changed on the server (ETag or Last-Modified mismatch), preventing safe resume.
+    #[error("Remote file changed on server: {0}")]
+    RemoteFileChanged(String),
+
+    /// Download operation was paused via cancellation token.
+    #[error("Download was paused")]
+    DownloadPaused,
 }
 
 /// Convenience alias for Results returning [`TenunError`].
