@@ -87,8 +87,10 @@ pub fn classify_reqwest_error(err: &reqwest::Error) -> ErrorKind {
     ErrorKind::Retryable { retry_after: None }
 }
 
+use serde::{Deserialize, Serialize};
+
 /// Retry policy configuration for download operations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RetryPolicy {
     /// Maximum number of retry attempts per segment or operation.
     pub max_retries: usize,

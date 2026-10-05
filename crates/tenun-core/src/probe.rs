@@ -32,6 +32,12 @@ pub struct RequestOptions {
     pub min_segment_size: Option<u64>,
     /// Force HTTP/1.1 connections to prevent multiplexing into a single TCP stream.
     pub http1_only: bool,
+    /// Optional bandwidth rate limit in bytes per second.
+    #[serde(default)]
+    pub limit_rate: Option<u64>,
+    /// Optional retry and stall policy.
+    #[serde(default)]
+    pub retry_policy: Option<crate::retry::RetryPolicy>,
 }
 
 impl Default for RequestOptions {
@@ -47,6 +53,8 @@ impl Default for RequestOptions {
             connections: Some(crate::segment::DEFAULT_CONNECTIONS),
             min_segment_size: Some(crate::segment::DEFAULT_MIN_SEGMENT_SIZE),
             http1_only: true,
+            limit_rate: None,
+            retry_policy: None,
         }
     }
 }
