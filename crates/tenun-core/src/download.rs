@@ -83,6 +83,7 @@ pub async fn download_single(
 ) -> Result<PathBuf> {
     let client = build_client(opts)?;
 
+    std::fs::create_dir_all(dest_dir).map_err(TenunError::Io)?;
     info!("Probing remote resource: {url}");
     let remote_info = probe(&client, url, opts).await?;
     info!(
@@ -186,6 +187,7 @@ pub async fn download_segmented(
 ) -> Result<PathBuf> {
     let client = build_client(opts)?;
 
+    std::fs::create_dir_all(dest_dir).map_err(TenunError::Io)?;
     info!("Probing remote resource for segmented download: {url}");
     let remote_info = probe(&client, url, opts).await?;
 

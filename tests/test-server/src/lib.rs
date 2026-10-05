@@ -38,6 +38,8 @@ pub struct TestServerConfig {
     pub error_status: Option<StatusCode>,
     /// Optional Retry-After header value when returning errors.
     pub retry_after: Option<String>,
+    /// Bandwidth limit per connection in bytes per second.
+    pub speed_limit_bytes_per_sec: Option<u64>,
     /// Number of requests received so far.
     pub request_count: usize,
 }
@@ -55,6 +57,7 @@ impl Default for TestServerConfig {
             delay: None,
             error_status: None,
             retry_after: None,
+            speed_limit_bytes_per_sec: None,
             request_count: 0,
         }
     }
@@ -175,10 +178,12 @@ async fn handle_download(
     if !cfg.range_enabled || cfg.force_200_for_range {
         response_builder = response_builder.header(header::ACCEPT_RANGES, "none");
         response_builder = response_builder.header(header::CONTENT_LENGTH, total_len.to_string());
-        return response_builder
-            .status(StatusCode::OK)
-            .body(Body::from(cfg.data))
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        return create_throttled_response(
+            response_builder,
+            StatusCode::OK,
+            cfg.data,
+            cfg.speed_limit_bytes_per_sec,
+        );
     }
 
     response_builder = response_builder.header(header::ACCEPT_RANGES, "bytes");
@@ -187,18 +192,20 @@ async fn handle_download(
         if let Some(parsed_range) = parse_range_header(range_header, total_len) {
             match parsed_range {
                 RangeResult::Satisfiable { start, end } => {
-                    let chunk = &cfg.data[start..=end];
+                    let chunk = cfg.data[start..=end].to_vec();
                     let content_range = format!("bytes {}-{}/{}", start, end, total_len);
                     let content_len = (end - start + 1).to_string();
 
                     response_builder = response_builder
-                        .status(StatusCode::PARTIAL_CONTENT)
                         .header(header::CONTENT_RANGE, content_range)
                         .header(header::CONTENT_LENGTH, content_len);
 
-                    return response_builder
-                        .body(Body::from(Bytes::copy_from_slice(chunk)))
-                        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+                    return create_throttled_response(
+                        response_builder,
+                        StatusCode::PARTIAL_CONTENT,
+                        chunk,
+                        cfg.speed_limit_bytes_per_sec,
+                    );
                 }
                 RangeResult::Unsatisfiable => {
                     let content_range = format!("bytes */{}", total_len);
@@ -213,12 +220,42 @@ async fn handle_download(
     }
 
     // Default full content response
-    response_builder = response_builder
-        .status(StatusCode::OK)
-        .header(header::CONTENT_LENGTH, total_len.to_string());
+    response_builder = response_builder.header(header::CONTENT_LENGTH, total_len.to_string());
 
-    response_builder
-        .body(Body::from(cfg.data))
+    create_throttled_response(
+        response_builder,
+        StatusCode::OK,
+        cfg.data,
+        cfg.speed_limit_bytes_per_sec,
+    )
+}
+
+fn create_throttled_response(
+    builder: axum::http::response::Builder,
+    status: StatusCode,
+    data: Vec<u8>,
+    speed_limit: Option<u64>,
+) -> Response {
+    let body = match speed_limit {
+        Some(limit) if limit > 0 => {
+            let chunk_size = 16 * 1024; // 16 KiB chunks
+            let delay_secs = (chunk_size as f64) / (limit as f64);
+            let chunk_delay = Duration::from_secs_f64(delay_secs);
+
+            let stream = async_stream::stream! {
+                for chunk in data.chunks(chunk_size) {
+                    yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(chunk));
+                    tokio::time::sleep(chunk_delay).await;
+                }
+            };
+            Body::from_stream(stream)
+        }
+        _ => Body::from(data),
+    };
+
+    builder
+        .status(status)
+        .body(body)
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
@@ -233,19 +270,14 @@ fn parse_range_header(range_str: &str, total: usize) -> Option<RangeResult> {
         return None;
     }
     let spec = &range_str["bytes=".len()..];
-    // Support single range "start-end"
     let (start_str, end_str) = spec.split_once('-')?;
 
     if start_str.is_empty() {
-        // Suffix range: -N means last N bytes
         let suffix_len: usize = end_str.parse().ok()?;
-        if suffix_len == 0 {
+        if suffix_len == 0 || total == 0 {
             return Some(RangeResult::Unsatisfiable);
         }
         let start = total.saturating_sub(suffix_len);
-        if total == 0 {
-            return Some(RangeResult::Unsatisfiable);
-        }
         Some(RangeResult::Satisfiable {
             start,
             end: total.saturating_sub(1),
