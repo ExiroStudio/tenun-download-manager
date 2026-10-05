@@ -705,15 +705,7 @@ async fn run_download_job(
                         last_progress = Instant::now();
                     }
                 }
-                DownloadEvent::Finished { path, total_bytes } => {
-                    let _ = w_tx
-                        .send(WorkerMessage::Finished {
-                            id,
-                            path,
-                            total_bytes,
-                        })
-                        .await;
-                }
+                DownloadEvent::Finished { .. } => {}
             }
         }
     });
