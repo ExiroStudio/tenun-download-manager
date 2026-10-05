@@ -34,6 +34,9 @@ pub struct DownloadState {
     pub segments: Vec<SegmentState>,
     /// Safe request options (excluding raw secrets).
     pub options: PersistedOptions,
+    /// Expected checksum for integrity verification.
+    #[serde(default)]
+    pub expected_checksum: Option<crate::checksum::ExpectedChecksum>,
     /// Timestamp when download started (Unix timestamp seconds).
     pub created_at: u64,
     /// Timestamp of last written checkpoint.
@@ -95,6 +98,12 @@ pub struct PersistedOptions {
     /// Bandwidth rate limit in bytes per second.
     #[serde(default)]
     pub limit_rate: Option<u64>,
+    /// Collision resolution strategy when file already exists.
+    #[serde(default)]
+    pub clash_resolution: crate::checksum::ClashResolution,
+    /// Expected checksum for integrity verification.
+    #[serde(default)]
+    pub expected_checksum: Option<crate::checksum::ExpectedChecksum>,
 }
 
 impl PersistedOptions {
@@ -116,6 +125,8 @@ impl PersistedOptions {
             referer: opts.referer.clone(),
             custom_headers: safe_headers,
             limit_rate: opts.limit_rate,
+            clash_resolution: opts.clash_resolution,
+            expected_checksum: opts.expected_checksum.clone(),
         }
     }
 
@@ -127,6 +138,8 @@ impl PersistedOptions {
             referer: self.referer.clone(),
             connections: Some(self.connections),
             limit_rate: self.limit_rate,
+            clash_resolution: self.clash_resolution,
+            expected_checksum: self.expected_checksum.clone(),
             ..Default::default()
         }
     }
@@ -155,6 +168,11 @@ impl DownloadState {
             })
             .collect();
 
+        let expected_checksum = opts
+            .expected_checksum
+            .clone()
+            .or_else(|| info.expected_checksum.clone());
+
         Self {
             version: STATE_SCHEMA_VERSION,
             url: info.original_url.clone(),
@@ -165,6 +183,7 @@ impl DownloadState {
             last_modified: info.last_modified.clone(),
             segments: segment_states,
             options: PersistedOptions::from_request_options(opts, segments.len()),
+            expected_checksum,
             created_at: now,
             updated_at: now,
         }
@@ -252,6 +271,7 @@ mod tests {
             etag: Some("\"etag-12345\"".to_string()),
             last_modified: Some("Mon, 05 Oct 2026 12:00:00 GMT".to_string()),
             content_type: None,
+            expected_checksum: None,
         };
 
         let state = DownloadState::from_remote_info(&info, "sample.iso", &segs, &opts);

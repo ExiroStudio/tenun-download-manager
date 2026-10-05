@@ -23,8 +23,9 @@ pub use checksum::{
 };
 pub use config::AppDirectories;
 pub use download::{
-    download_segmented, download_segmented_with_cancel, download_single, resolve_unique_filename,
-    resume_download, resume_download_with_options, DownloadEvent,
+    download_segmented, download_segmented_with_cancel, download_single, resolve_destination,
+    resolve_unique_filename, resume_download, resume_download_with_options, DownloadEvent,
+    ResolvedDestination,
 };
 pub use error::{Result, TenunError};
 pub use limiter::TokenBucketLimiter;

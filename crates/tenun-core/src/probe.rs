@@ -38,6 +38,12 @@ pub struct RequestOptions {
     /// Optional retry and stall policy.
     #[serde(default)]
     pub retry_policy: Option<crate::retry::RetryPolicy>,
+    /// Expected checksum for automatic integrity verification.
+    #[serde(default)]
+    pub expected_checksum: Option<crate::checksum::ExpectedChecksum>,
+    /// Collision resolution strategy when file already exists.
+    #[serde(default)]
+    pub clash_resolution: crate::checksum::ClashResolution,
 }
 
 impl Default for RequestOptions {
@@ -55,6 +61,8 @@ impl Default for RequestOptions {
             http1_only: true,
             limit_rate: None,
             retry_policy: None,
+            expected_checksum: None,
+            clash_resolution: crate::checksum::ClashResolution::default(),
         }
     }
 }
@@ -78,6 +86,8 @@ pub struct RemoteInfo {
     pub last_modified: Option<String>,
     /// MIME Content-Type.
     pub content_type: Option<String>,
+    /// Expected checksum discovered from headers (Digest, Content-MD5, ETag).
+    pub expected_checksum: Option<crate::checksum::ExpectedChecksum>,
 }
 
 /// Builds a configured `reqwest::Client` with automatic decompression disabled
@@ -254,6 +264,7 @@ async fn process_probe_response(original_url: &str, response: Response) -> Resul
     };
 
     let filename = determine_filename(&headers, &final_url, original_url);
+    let expected_checksum = crate::checksum::extract_checksum_from_headers(&headers);
 
     Ok(RemoteInfo {
         original_url: original_url.to_string(),
@@ -264,6 +275,7 @@ async fn process_probe_response(original_url: &str, response: Response) -> Resul
         etag,
         last_modified,
         content_type,
+        expected_checksum,
     })
 }
 
