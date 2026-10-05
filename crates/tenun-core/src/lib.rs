@@ -30,7 +30,8 @@ pub use retry::{
     RetryPolicy,
 };
 pub use segment::{
-    calculate_segments, Segment, DEFAULT_CONNECTIONS, DEFAULT_MIN_SEGMENT_SIZE, MAX_CONNECTIONS,
+    calculate_segments, DynamicSegment, Segment, SegmentManager, DEFAULT_CONNECTIONS,
+    DEFAULT_MIN_SEGMENT_SIZE, MAX_CONNECTIONS,
 };
 pub use state::{load_state, save_state_atomic, DownloadState, SegmentState, STATE_SCHEMA_VERSION};
 pub use tokio_util::sync::CancellationToken;
