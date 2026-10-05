@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
-use tenun_core::{download_single, init_logging, AppDirectories, DownloadEvent, RequestOptions};
+use tenun_core::{download_segmented, init_logging, AppDirectories, DownloadEvent, RequestOptions};
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -17,7 +17,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Download a file from a URL using single stream (segmented download in Phase 2)
+    /// Download a file from a URL using multi-connection segmented download
     Get {
         /// Target URL to download
         url: String,
@@ -25,6 +25,10 @@ enum Commands {
         /// Output directory where the file will be saved
         #[arg(short, long)]
         output: Option<PathBuf>,
+
+        /// Number of parallel connections to use (default: 8, max: 32)
+        #[arg(short, long, default_value_t = 8)]
+        connections: usize,
 
         /// Custom User-Agent header
         #[arg(long)]
@@ -49,6 +53,7 @@ async fn main() -> Result<()> {
         Commands::Get {
             url,
             output,
+            connections,
             user_agent,
             referer,
             cookie,
@@ -65,7 +70,10 @@ async fn main() -> Result<()> {
                 format!("Failed to create output directory: {}", dest_dir.display())
             })?;
 
+            let conn_clamped = connections.clamp(1, 32);
+
             let opts = RequestOptions {
+                connections: Some(conn_clamped),
                 user_agent,
                 referer,
                 cookie,
@@ -105,7 +113,9 @@ async fn main() -> Result<()> {
                                     b
                                 }
                             };
-                            bar.set_message(format!("Downloading {filename}"));
+                            bar.set_message(format!(
+                                "Downloading {filename} (connections: {conn_clamped})"
+                            ));
                             pb = Some(bar);
                         }
                         DownloadEvent::Progress {
@@ -128,8 +138,8 @@ async fn main() -> Result<()> {
                 }
             });
 
-            info!("Starting download for {url}");
-            let final_path = download_single(&url, &dest_dir, &opts, Some(tx)).await?;
+            info!("Starting segmented download for {url} with {conn_clamped} connections");
+            let final_path = download_segmented(&url, &dest_dir, &opts, Some(tx)).await?;
             let _ = progress_task.await;
 
             println!("Download complete: {}", final_path.display());
