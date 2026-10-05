@@ -5234,9 +5234,13 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "axum",
+ "base64 0.22.1",
  "bytes",
+ "hex",
  "http",
+ "md-5",
  "reqwest",
+ "sha2",
  "tempfile",
  "tenun-core",
  "tokio",
