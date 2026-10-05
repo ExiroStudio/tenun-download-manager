@@ -7,6 +7,7 @@
 pub mod category;
 pub mod checksum;
 pub mod config;
+pub mod db;
 pub mod download;
 pub mod error;
 pub mod limiter;
@@ -24,6 +25,7 @@ pub use checksum::{
     ChecksumAlgorithm, ClashResolution, ExpectedChecksum,
 };
 pub use config::AppDirectories;
+pub use db::{Database, DownloadRecord, DownloadStatus, NewDownloadRecord};
 pub use download::{
     download_segmented, download_segmented_with_cancel, download_single, resolve_destination,
     resolve_unique_filename, resume_download, resume_download_with_options, DownloadEvent,
