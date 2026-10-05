@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/tenun-core",
+    "crates/tenun-cli",
 ]
 resolver = "2"
 

@@ -1,0 +1,16 @@
+[package]
+name = "tenun-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Command-line interface for Tenun Download Manager"
+
+[[bin]]
+name = "tenun"
+path = "src/main.rs"
+
+[dependencies]
+tenun-core = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
