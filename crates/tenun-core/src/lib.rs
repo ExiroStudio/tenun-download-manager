@@ -18,7 +18,7 @@ pub mod state;
 pub use config::AppDirectories;
 pub use download::{
     download_segmented, download_segmented_with_cancel, download_single, resolve_unique_filename,
-    resume_download, DownloadEvent,
+    resume_download, resume_download_with_options, DownloadEvent,
 };
 pub use error::{Result, TenunError};
 pub use limiter::TokenBucketLimiter;

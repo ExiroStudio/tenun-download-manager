@@ -303,6 +303,16 @@ pub async fn resume_download(
     event_tx: Option<UnboundedSender<DownloadEvent>>,
     cancel_token: CancellationToken,
 ) -> Result<PathBuf> {
+    resume_download_with_options(state_path, event_tx, cancel_token, None).await
+}
+
+/// Resumes an interrupted or paused download with optional request option overrides.
+pub async fn resume_download_with_options(
+    state_path: &Path,
+    event_tx: Option<UnboundedSender<DownloadEvent>>,
+    cancel_token: CancellationToken,
+    opts_override: Option<&RequestOptions>,
+) -> Result<PathBuf> {
     let state = load_state(state_path)?;
     let dest_dir = state_path.parent().unwrap_or_else(|| Path::new("."));
 
@@ -324,7 +334,19 @@ pub async fn resume_download(
         )));
     }
 
-    let opts = state.options.to_request_options();
+    let mut opts = state.options.to_request_options();
+    if let Some(over) = opts_override {
+        if over.limit_rate.is_some() {
+            opts.limit_rate = over.limit_rate;
+        }
+        if over.retry_policy.is_some() {
+            opts.retry_policy = over.retry_policy.clone();
+        }
+        if over.user_agent.is_some() {
+            opts.user_agent = over.user_agent.clone();
+        }
+    }
+
     let client = build_client(&opts)?;
 
     info!(
