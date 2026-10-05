@@ -188,6 +188,27 @@ async fn handle_download(
 
     response_builder = response_builder.header(header::ACCEPT_RANGES, "bytes");
 
+    // Check If-Range validator if present
+    if let Some(if_range) = headers.get(header::IF_RANGE).and_then(|v| v.to_str().ok()) {
+        let etag_matches = cfg.etag.as_deref().map(|e| e == if_range).unwrap_or(false);
+        let lm_matches = cfg
+            .last_modified
+            .as_deref()
+            .map(|lm| lm == if_range)
+            .unwrap_or(false);
+        if !etag_matches && !lm_matches {
+            // Validator mismatch: ignore Range and reply with 200 OK
+            response_builder =
+                response_builder.header(header::CONTENT_LENGTH, total_len.to_string());
+            return create_throttled_response(
+                response_builder,
+                StatusCode::OK,
+                cfg.data,
+                cfg.speed_limit_bytes_per_sec,
+            );
+        }
+    }
+
     if let Some(range_header) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
         if let Some(parsed_range) = parse_range_header(range_header, total_len) {
             match parsed_range {

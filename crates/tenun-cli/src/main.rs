@@ -4,7 +4,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
-use tenun_core::{download_segmented, init_logging, AppDirectories, DownloadEvent, RequestOptions};
+use tenun_core::{
+    download_segmented_with_cancel, init_logging, resume_download, AppDirectories,
+    CancellationToken, DownloadEvent, RequestOptions, TenunError,
+};
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -42,12 +45,31 @@ enum Commands {
         #[arg(long)]
         cookie: Option<String>,
     },
+
+    /// Resume an interrupted or paused download from a .tenun state file
+    Resume {
+        /// Path to the .tenun state file
+        state_file: PathBuf,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging("warn");
+
+    let cancel_token = CancellationToken::new();
+
+    // Graceful Ctrl+C handler
+    {
+        let token = cancel_token.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("\nPausing download and saving checkpoint to .tenun state file...");
+                token.cancel();
+            }
+        });
+    }
 
     match cli.command {
         Commands::Get {
@@ -82,7 +104,6 @@ async fn main() -> Result<()> {
 
             let (tx, mut rx) = mpsc::unbounded_channel::<DownloadEvent>();
 
-            // Spawn progress bar handler in background
             let progress_task = tokio::spawn(async move {
                 let mut pb: Option<ProgressBar> = None;
 
@@ -138,11 +159,92 @@ async fn main() -> Result<()> {
                 }
             });
 
-            info!("Starting segmented download for {url} with {conn_clamped} connections");
-            let final_path = download_segmented(&url, &dest_dir, &opts, Some(tx)).await?;
+            info!("Starting download for {url}");
+            let res =
+                download_segmented_with_cancel(&url, &dest_dir, &opts, Some(tx), cancel_token)
+                    .await;
             let _ = progress_task.await;
 
-            println!("Download complete: {}", final_path.display());
+            match res {
+                Ok(path) => println!("Download complete: {}", path.display()),
+                Err(TenunError::DownloadPaused) => {
+                    println!("Download paused cleanly. You can resume later using 'tenun resume'.");
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        Commands::Resume { state_file } => {
+            if !state_file.exists() {
+                anyhow::bail!("State file '{}' does not exist", state_file.display());
+            }
+
+            let (tx, mut rx) = mpsc::unbounded_channel::<DownloadEvent>();
+
+            let progress_task = tokio::spawn(async move {
+                let mut pb: Option<ProgressBar> = None;
+
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        DownloadEvent::Started {
+                            filename,
+                            total_bytes,
+                        } => {
+                            let bar = match total_bytes {
+                                Some(total) => {
+                                    let b = ProgressBar::new(total);
+                                    let style = ProgressStyle::default_bar()
+                                        .template("{msg}\n[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) {bytes_per_sec}")
+                                        .unwrap_or_else(|_| ProgressStyle::default_bar())
+                                        .progress_chars("#>-");
+                                    b.set_style(style);
+                                    b
+                                }
+                                None => {
+                                    let b = ProgressBar::new_spinner();
+                                    let style = ProgressStyle::default_spinner()
+                                        .template(
+                                            "{msg}\n[{elapsed_precise}] {bytes} ({bytes_per_sec})",
+                                        )
+                                        .unwrap_or_else(|_| ProgressStyle::default_spinner());
+                                    b.set_style(style);
+                                    b
+                                }
+                            };
+                            bar.set_message(format!("Resuming {filename}"));
+                            pb = Some(bar);
+                        }
+                        DownloadEvent::Progress {
+                            downloaded_bytes, ..
+                        } => {
+                            if let Some(ref b) = pb {
+                                b.set_position(downloaded_bytes);
+                            }
+                        }
+                        DownloadEvent::Finished { path, total_bytes } => {
+                            if let Some(b) = pb.take() {
+                                b.finish_with_message(format!(
+                                    "Saved {} ({} bytes)",
+                                    path.display(),
+                                    total_bytes
+                                ));
+                            }
+                        }
+                    }
+                }
+            });
+
+            info!("Resuming download from state: {}", state_file.display());
+            let res = resume_download(&state_file, Some(tx), cancel_token).await;
+            let _ = progress_task.await;
+
+            match res {
+                Ok(path) => println!("Download resumed and completed: {}", path.display()),
+                Err(TenunError::DownloadPaused) => {
+                    println!("Download paused cleanly. You can resume again using 'tenun resume'.");
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
     }
 
