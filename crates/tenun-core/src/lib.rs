@@ -13,7 +13,7 @@ pub mod probe;
 pub mod segment;
 
 pub use config::AppDirectories;
-pub use download::{download_single, resolve_unique_filename, DownloadEvent};
+pub use download::{download_segmented, download_single, resolve_unique_filename, DownloadEvent};
 pub use error::{Result, TenunError};
 pub use logging::init_logging;
 pub use platform::{atomic_rename_file, sanitize_filename, sync_file, PositionalWrite};
