@@ -7,6 +7,7 @@
 pub mod config;
 pub mod download;
 pub mod error;
+pub mod limiter;
 pub mod logging;
 pub mod platform;
 pub mod probe;
@@ -20,6 +21,7 @@ pub use download::{
     resume_download, DownloadEvent,
 };
 pub use error::{Result, TenunError};
+pub use limiter::TokenBucketLimiter;
 pub use logging::init_logging;
 pub use platform::{atomic_rename_file, sanitize_filename, sync_file, PositionalWrite};
 pub use probe::{apply_options, build_client, probe, RemoteInfo, RequestOptions};
