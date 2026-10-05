@@ -1,0 +1,165 @@
+import { Theme } from "theme.slint";
+import { CustomInput, PrimaryButton, SecondaryButton, TextLinkButton } from "common.slint";
+
+export component SettingsDialog inherits Rectangle {
+    in-out property <string> default-folder: "Downloads";
+    in-out property <string> concurrent-str <=> concurrent-input.text;
+    in-out property <string> speed-limit-str <=> speed-input.text;
+    in-out property <bool> dark-mode: false;
+
+    callback change-default-folder();
+    callback cancel-clicked();
+    callback save-clicked();
+    callback toggle-theme();
+
+    background: #00000055;
+
+    TouchArea {
+        clicked => { root.cancel-clicked(); }
+    }
+
+    dialog-card := Rectangle {
+        width: 500px;
+        border-radius: Theme.radius-dialog;
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 24px;
+            spacing: 16px;
+
+            Text {
+                text: "Settings";
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+            }
+
+            // General Section
+            VerticalLayout {
+                spacing: 8px;
+
+                Text {
+                    text: "General";
+                    font-size: Theme.font-body;
+                    font-weight: 600;
+                    color: Theme.text;
+                }
+
+                HorizontalLayout {
+                    alignment: space-between;
+
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text { text: "Default download location"; font-size: Theme.font-caption; color: Theme.text-secondary; }
+                        Text { text: root.default-folder; font-size: Theme.font-body; color: Theme.text; overflow: elide; max-width: 360px; }
+                    }
+
+                    TextLinkButton {
+                        text: "Change";
+                        clicked => { root.change-default-folder(); }
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: Theme.border; }
+
+            // Network Section
+            VerticalLayout {
+                spacing: 10px;
+
+                Text {
+                    text: "Network";
+                    font-size: Theme.font-body;
+                    font-weight: 600;
+                    color: Theme.text;
+                }
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: space-between;
+
+                    Text {
+                        text: "Max concurrent downloads:";
+                        font-size: Theme.font-caption;
+                        color: Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+
+                    concurrent-input := CustomInput {
+                        width: 80px;
+                        placeholder: "3";
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: space-between;
+
+                    Text {
+                        text: "Global speed limit:";
+                        font-size: Theme.font-caption;
+                        color: Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+
+                    speed-input := CustomInput {
+                        width: 140px;
+                        placeholder: "e.g. 5M or empty";
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: Theme.border; }
+
+            // Appearance Section
+            VerticalLayout {
+                spacing: 8px;
+
+                Text {
+                    text: "Appearance";
+                    font-size: Theme.font-body;
+                    font-weight: 600;
+                    color: Theme.text;
+                }
+
+                HorizontalLayout {
+                    alignment: space-between;
+
+                    Text {
+                        text: "Theme Mode:";
+                        font-size: Theme.font-caption;
+                        color: Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+
+                    TextLinkButton {
+                        text: root.dark-mode ? "🌙 Dark (Click for Light)" : "☀️ Light (Click for Dark)";
+                        clicked => { root.toggle-theme(); }
+                    }
+                }
+            }
+
+            // Buttons
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: end;
+
+                SecondaryButton {
+                    text: "Cancel";
+                    min-width: 90px;
+                    clicked => { root.cancel-clicked(); }
+                }
+
+                PrimaryButton {
+                    text: "Save";
+                    min-width: 100px;
+                    clicked => { root.save-clicked(); }
+                }
+            }
+        }
+    }
+}

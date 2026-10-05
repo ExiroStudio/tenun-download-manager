@@ -1,0 +1,41 @@
+export global Theme {
+    in-out property <bool> is-dark: false;
+
+    // Background & Surfaces
+    out property <color> background: is-dark ? #1A1B1E : #F6F7F9;
+    out property <color> surface: is-dark ? #25262B : #FFFFFF;
+    out property <color> surface-secondary: is-dark ? #2C2E33 : #F0F2F5;
+    out property <color> surface-hover: is-dark ? #2F3136 : #F8F9FA;
+
+    // Text & Content
+    out property <color> text: is-dark ? #F1F3F5 : #14161A;
+    out property <color> text-secondary: is-dark ? #909296 : #5B6472;
+    out property <color> text-muted: is-dark ? #6C7077 : #868E96;
+
+    // Borders & Lines
+    out property <color> border: is-dark ? #2C2E33 : #E4E7EC;
+    out property <color> input-border: is-dark ? #373A40 : #D5D9E0;
+    out property <color> input-border-focus: #3B5BDB;
+
+    // Accent & Status
+    out property <color> accent: #3B5BDB;
+    out property <color> accent-hover: #364FC7;
+    out property <color> accent-light: is-dark ? #242E4C : #EDF2FF;
+    out property <color> paused: #9AA3B2;
+    out property <color> success: #2F7D4F;
+    out property <color> success-light: is-dark ? #1E382B : #EBFBEE;
+    out property <color> error: #E03131;
+    out property <color> error-light: is-dark ? #3B2125 : #FFF5F5;
+
+    // Metrics & Radius
+    out property <length> radius-card: 10px;
+    out property <length> radius-dialog: 14px;
+    out property <length> radius-pill: 20px;
+    out property <length> touch-target-min: 44px;
+
+    // Typography
+    out property <length> font-title: 18px;
+    out property <length> font-body: 15px;
+    out property <length> font-caption: 13px;
+    out property <length> font-small: 12px;
+}

@@ -1,0 +1,136 @@
+import { Theme } from "theme.slint";
+import { IconButton, TextLinkButton, ThinProgressBar } from "common.slint";
+
+export struct DownloadItemData {
+    id: int,
+    filename: string,
+    progress-pct: float,
+    progress-text: string,
+    info-text: string,
+    status-str: string,
+    is-downloading: bool,
+    is-paused: bool,
+    is-completed: bool,
+    is-failed: bool,
+}
+
+export component DownloadRow inherits Rectangle {
+    in-out property <DownloadItemData> item;
+
+    callback pause-clicked(int);
+    callback resume-clicked(int);
+    callback open-clicked(int);
+    callback more-clicked(int);
+
+    min-height: 84px;
+    background: row-touch.has-hover ? Theme.surface-hover : Theme.surface;
+    border-radius: Theme.radius-card;
+
+    animate background { duration: 150ms; }
+
+    row-touch := TouchArea {
+        mouse-cursor: default;
+    }
+
+    VerticalLayout {
+        padding-top: 12px;
+        padding-bottom: 12px;
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 8px;
+
+        // Line 1: Filename and percentage
+        HorizontalLayout {
+            alignment: space-between;
+
+            Text {
+                text: root.item.filename;
+                font-size: Theme.font-body;
+                font-weight: 500;
+                color: Theme.text;
+                overflow: elide;
+                max-width: 580px;
+                vertical-alignment: center;
+            }
+
+            if !root.item.is-completed: Text {
+                text: root.item.progress-text;
+                font-size: Theme.font-caption;
+                font-weight: 500;
+                color: Theme.text-secondary;
+                vertical-alignment: center;
+            }
+        }
+
+        // Line 2: Progress bar (only if not completed)
+        if !root.item.is-completed: ThinProgressBar {
+            progress: root.item.progress-pct;
+            fill-color: root.item.is-failed ? Theme.error : (root.item.is-paused ? Theme.paused : Theme.accent);
+        }
+
+        // Line 3: Info text and actions
+        HorizontalLayout {
+            alignment: space-between;
+
+            // Info line
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: start;
+
+                if root.item.is-completed: Text {
+                    text: "✓";
+                    font-size: Theme.font-caption;
+                    font-weight: 600;
+                    color: Theme.success;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: root.item.info-text;
+                    font-size: Theme.font-caption;
+                    color: root.item.is-failed ? Theme.error : (root.item.is-completed ? Theme.text-secondary : Theme.text-secondary);
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            // Action buttons on right
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+
+                if root.item.is-downloading: IconButton {
+                    text: "⏸";
+                    icon-size: 14px;
+                    icon-color: Theme.text-secondary;
+                    clicked => { root.pause-clicked(root.item.id); }
+                }
+
+                if root.item.is-paused || root.item.is-failed: IconButton {
+                    text: "▶";
+                    icon-size: 14px;
+                    icon-color: Theme.accent;
+                    clicked => { root.resume-clicked(root.item.id); }
+                }
+
+                if root.item.is-completed: TextLinkButton {
+                    text: "Open";
+                    clicked => { root.open-clicked(root.item.id); }
+                }
+
+                IconButton {
+                    text: "⋯";
+                    icon-size: 18px;
+                    icon-color: Theme.text-secondary;
+                    clicked => { root.more-clicked(root.item.id); }
+                }
+            }
+        }
+
+        // Bottom divider
+        Rectangle {
+            height: 1px;
+            background: Theme.border;
+        }
+    }
+}

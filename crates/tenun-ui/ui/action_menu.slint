@@ -1,0 +1,129 @@
+import { Theme } from "theme.slint";
+import { SecondaryButton } from "common.slint";
+
+export component ActionMenuItem inherits Rectangle {
+    in-out property <string> text: "";
+    in-out property <string> icon: "";
+    in-out property <bool> is-danger: false;
+
+    callback clicked();
+
+    min-height: 40px;
+    border-radius: 8px;
+    background: touch.has-hover ? (root.is-danger ? Theme.error-light : Theme.surface-secondary) : Colors.transparent;
+
+    animate background { duration: 100ms; }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 12px;
+
+        if root.icon != "": Text {
+            text: root.icon;
+            font-size: Theme.font-body;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: root.text;
+            font-size: Theme.font-body;
+            font-weight: 500;
+            color: root.is-danger ? Theme.error : Theme.text;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component ActionMenu inherits Rectangle {
+    in-out property <int> item-id: 0;
+    in-out property <bool> is-completed: false;
+    in-out property <bool> is-failed: false;
+
+    callback close();
+    callback open-file(int);
+    callback open-folder(int);
+    callback copy-link(int);
+    callback retry-download(int);
+    callback show-details(int);
+    callback delete-item(int, bool); // id, delete_disk_file
+
+    background: #00000055;
+
+    TouchArea {
+        clicked => { root.close(); }
+    }
+
+    menu-card := Rectangle {
+        width: 280px;
+        border-radius: Theme.radius-dialog;
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 12px;
+            spacing: 4px;
+
+            if root.is-completed: ActionMenuItem {
+                icon: "📄";
+                text: "Open file";
+                clicked => { root.open-file(root.item-id); root.close(); }
+            }
+
+            ActionMenuItem {
+                icon: "📁";
+                text: "Open folder";
+                clicked => { root.open-folder(root.item-id); root.close(); }
+            }
+
+            ActionMenuItem {
+                icon: "🔗";
+                text: "Copy link";
+                clicked => { root.copy-link(root.item-id); root.close(); }
+            }
+
+            if root.is-failed: ActionMenuItem {
+                icon: "🔄";
+                text: "Retry download";
+                clicked => { root.retry-download(root.item-id); root.close(); }
+            }
+
+            ActionMenuItem {
+                icon: "ℹ️";
+                text: "Details";
+                clicked => { root.show-details(root.item-id); root.close(); }
+            }
+
+            Rectangle { height: 1px; background: Theme.border; }
+
+            ActionMenuItem {
+                icon: "🗑️";
+                text: "Remove from list";
+                is-danger: true;
+                clicked => { root.delete-item(root.item-id, false); root.close(); }
+            }
+
+            ActionMenuItem {
+                icon: "⚠️";
+                text: "Delete file & remove";
+                is-danger: true;
+                clicked => { root.delete-item(root.item-id, true); root.close(); }
+            }
+
+            Rectangle { height: 1px; background: Theme.border; }
+
+            SecondaryButton {
+                text: "Cancel";
+                clicked => { root.close(); }
+            }
+        }
+    }
+}
