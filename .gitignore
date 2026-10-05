@@ -1,0 +1,31 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Tenun temporary download and state files
+*.part
+*.tenun
+
+# Environment and sensitive files
+.env
+.env.*
+!.env.example
+
+# Large test files / temporary test data
+/tests/fixtures/large/
+/tests/temp/
+*.iso
+*.img
+*.bin
+
+# Slint generated artifacts (if any outside target)
+*.slint-build/
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
