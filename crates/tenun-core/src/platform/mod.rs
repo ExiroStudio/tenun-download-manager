@@ -38,6 +38,47 @@ pub trait PositionalWrite {
     }
 }
 
+#[cfg(unix)]
+pub use unix::available_disk_space;
+#[cfg(windows)]
+pub use windows::available_disk_space;
+
+/// Checks if the partition containing `path` has at least `required_bytes` free space.
+/// Returns `Ok(())` if sufficient or if space could not be strictly determined,
+/// and `Err(TenunError::InsufficientDiskSpace)` if available space is known to be less than required.
+pub fn ensure_disk_space(path: &Path, required_bytes: u64) -> Result<()> {
+    if required_bytes == 0 {
+        return Ok(());
+    }
+    // Path might not exist yet, find the closest existing ancestor directory
+    let mut check_path = path;
+    while !check_path.exists() {
+        match check_path.parent() {
+            Some(parent) => check_path = parent,
+            None => break,
+        }
+    }
+    match available_disk_space(check_path) {
+        Ok(available) => {
+            if available < required_bytes {
+                return Err(TenunError::InsufficientDiskSpace {
+                    required: required_bytes,
+                    available,
+                });
+            }
+            Ok(())
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Could not determine available disk space for {}: {}",
+                check_path.display(),
+                e
+            );
+            Ok(())
+        }
+    }
+}
+
 /// Flushes data and metadata of a file to disk (`fsync`).
 pub fn sync_file(file: &File) -> io::Result<()> {
     file.sync_data()
@@ -180,5 +221,29 @@ mod tests {
         let long_name = "a".repeat(300);
         let sanitized = sanitize_filename(&long_name);
         assert_eq!(sanitized.len(), 255);
+    }
+
+    #[test]
+    fn test_disk_space_checks() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let free = available_disk_space(temp.path()).expect("available space");
+        assert!(free > 0, "available disk space should be positive");
+
+        // Small requirement should pass
+        assert!(ensure_disk_space(temp.path(), 1024).is_ok());
+
+        // Absurd requirement (100 Petabytes) should fail
+        let huge = 100 * 1024 * 1024 * 1024 * 1024 * 1024;
+        let res = ensure_disk_space(temp.path(), huge);
+        match res {
+            Err(TenunError::InsufficientDiskSpace {
+                required,
+                available,
+            }) => {
+                assert_eq!(required, huge);
+                assert_eq!(available, free);
+            }
+            _ => panic!("Expected InsufficientDiskSpace error"),
+        }
     }
 }

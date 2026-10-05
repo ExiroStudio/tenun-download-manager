@@ -48,6 +48,21 @@ pub enum TenunError {
     /// Download operation was paused via cancellation token.
     #[error("Download was paused")]
     DownloadPaused,
+
+    /// Insufficient available disk space for target file allocation.
+    #[error(
+        "Insufficient disk space: required {required} bytes, but only {available} bytes available"
+    )]
+    InsufficientDiskSpace {
+        /// Required file size in bytes.
+        required: u64,
+        /// Available disk space in bytes.
+        available: u64,
+    },
+
+    /// SQLite database error.
+    #[error("Database error: {0}")]
+    Database(String),
 }
 
 /// Convenience alias for Results returning [`TenunError`].

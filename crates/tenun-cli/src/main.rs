@@ -7,8 +7,9 @@ use std::path::PathBuf;
 use tenun_core::{
     compute_file_checksum, download_segmented_with_cancel, init_logging, parse_checksum_file,
     resume_download_with_options, verify_file_checksum, AppDirectories, CancellationToken,
-    ChecksumAlgorithm, ClashResolution, DownloadEvent, ExpectedChecksum, RequestOptions,
-    TenunError,
+    ChecksumAlgorithm, ClashResolution, Database, DownloadEvent, DownloadManager,
+    DownloadManagerConfig, DownloadStatus, ExpectedChecksum, FileCategory, ManagerEvent,
+    NewDownloadRecord, RequestOptions, TenunError,
 };
 use tokio::sync::mpsc;
 use tracing::info;
@@ -69,6 +70,44 @@ fn parse_rate_limit(s: &str) -> std::result::Result<u64, String> {
             .map_err(|e| format!("Invalid rate number: {e}"))?;
         Ok(num)
     }
+}
+
+/// Formats a byte count into a human-readable string (B, KiB, MiB, GiB).
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+
+    if bytes >= GB {
+        format!("{:.2} GiB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MiB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KiB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Formats a transfer speed in bytes per second into human-readable rate.
+fn format_speed(bytes_per_sec: f64) -> String {
+    if bytes_per_sec >= (1024.0 * 1024.0) {
+        format!("{:.2} MB/s", bytes_per_sec / (1024.0 * 1024.0))
+    } else if bytes_per_sec >= 1024.0 {
+        format!("{:.2} KB/s", bytes_per_sec / 1024.0)
+    } else {
+        format!("{:.0} B/s", bytes_per_sec)
+    }
+}
+
+/// Opens the application SQLite database, creating data directories if necessary.
+fn get_database() -> Result<Database> {
+    let app_dirs = AppDirectories::detect().context("Failed to detect app directories")?;
+    let db_dir = app_dirs.data_dir();
+    std::fs::create_dir_all(db_dir)
+        .with_context(|| format!("Failed to create {}", db_dir.display()))?;
+    let db_path = db_dir.join("tenun.db");
+    Database::open(&db_path).context("Failed to open SQLite database")
 }
 
 /// Conflict resolution strategy when destination file already exists.
@@ -148,12 +187,82 @@ enum Commands {
         clash: ClashArg,
     },
 
-    /// Resume an interrupted or paused download from a .tenun state file
+    /// Add a download to the queue
+    Add {
+        /// Target URL to download
+        url: String,
+
+        /// Destination directory
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Number of parallel connections (1-32)
+        #[arg(short, long)]
+        connections: Option<usize>,
+
+        /// Priority in queue (higher runs earlier, default: 0)
+        #[arg(short, long, default_value_t = 0)]
+        priority: i32,
+
+        /// Category override (Documents, Compressed, Video, Audio, Images, Programs, General)
+        #[arg(long)]
+        category: Option<String>,
+
+        /// Start downloading immediately
+        #[arg(long)]
+        start_now: bool,
+    },
+
+    /// List downloads in the manager queue
+    List {
+        /// Filter by status (Queued, Probing, Downloading, Paused, Verifying, Completed, Failed, Cancelled, NeedsRefresh)
+        #[arg(short, long)]
+        status: Option<String>,
+
+        /// Filter by category (Documents, Compressed, Video, Audio, Images, Programs, General)
+        #[arg(short, long)]
+        category: Option<String>,
+    },
+
+    /// Pause an active or queued download
+    Pause {
+        /// ID of download to pause
+        id: u64,
+    },
+
+    /// Resume a download by ID or from a .tenun state file
     Resume {
-        /// Path to the .tenun state file
-        state_file: PathBuf,
+        /// Download ID in queue or path to .tenun state file
+        target: String,
 
         /// Maximum bandwidth rate limit override (e.g. 500K, 1M, 2MB)
+        #[arg(long, value_parser = parse_rate_limit)]
+        limit_rate: Option<u64>,
+    },
+
+    /// Cancel a download
+    Cancel {
+        /// ID of download to cancel
+        id: u64,
+    },
+
+    /// Remove a download from manager and database
+    Remove {
+        /// ID of download to remove
+        id: u64,
+
+        /// Also delete downloaded or partial files from disk
+        #[arg(long)]
+        delete_file: bool,
+    },
+
+    /// Run the download manager actor daemon processing the queue
+    Run {
+        /// Maximum concurrent downloads (default: 3)
+        #[arg(short, long, default_value_t = 3)]
+        concurrent: usize,
+
+        /// Global bandwidth rate limit (e.g. 500K, 1M, 2MB)
         #[arg(long, value_parser = parse_rate_limit)]
         limit_rate: Option<u64>,
     },
@@ -319,90 +428,383 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Resume {
-            state_file,
-            limit_rate,
+        Commands::Add {
+            url,
+            output,
+            connections,
+            priority,
+            category,
+            start_now,
         } => {
-            if !state_file.exists() {
-                anyhow::bail!("State file '{}' does not exist", state_file.display());
+            let app_dirs = AppDirectories::detect().context("Failed to detect app directories")?;
+            let db = get_database()?;
+
+            let filename = url
+                .rsplit('/')
+                .next()
+                .unwrap_or("download")
+                .split('?')
+                .next()
+                .unwrap_or("download")
+                .to_string();
+
+            let cat = if let Some(cat_str) = category {
+                cat_str
+                    .parse::<FileCategory>()
+                    .map_err(|e| anyhow::anyhow!(e))?
+            } else {
+                FileCategory::from_filename_or_mime(&filename, None)
+            };
+
+            let dest_dir =
+                output.unwrap_or_else(|| app_dirs.download_dir().join(cat.subfolder_name()));
+            std::fs::create_dir_all(&dest_dir).with_context(|| {
+                format!(
+                    "Failed to create download directory: {}",
+                    dest_dir.display()
+                )
+            })?;
+
+            let conn_clamped = connections.map(|c| c.clamp(1, 32));
+            let opts = RequestOptions {
+                connections: conn_clamped,
+                ..Default::default()
+            };
+
+            let status = if start_now {
+                DownloadStatus::Queued
+            } else {
+                DownloadStatus::Paused
+            };
+
+            let new_rec = NewDownloadRecord::new(
+                url.clone(),
+                filename.clone(),
+                dest_dir.to_string_lossy().to_string(),
+                cat,
+                status,
+                priority,
+                opts,
+            );
+
+            let id = db.insert(&new_rec)?;
+            println!("Added download #{id} ({filename})");
+            println!("  URL:      {url}");
+            println!("  Category: {cat}");
+            println!("  Folder:   {}", dest_dir.display());
+            println!("  Status:   {status}");
+            println!("  Priority: {priority}");
+            if !start_now {
+                println!(
+                    "\nDownload staged as Paused. Run 'tenun resume {id}' or run 'tenun run' to start."
+                );
+            } else {
+                println!(
+                    "\nDownload queued. Run 'tenun run' to process downloads if manager is not already running."
+                );
+            }
+        }
+
+        Commands::List { status, category } => {
+            let db = get_database()?;
+
+            let status_filter = if let Some(s) = status {
+                Some(DownloadStatus::parse(&s).ok_or_else(|| {
+                    anyhow::anyhow!("Unknown status '{}'. Valid: Queued, Probing, Downloading, Paused, Verifying, Completed, Failed, Cancelled, NeedsRefresh", s)
+                })?)
+            } else {
+                None
+            };
+
+            let category_filter = if let Some(c) = category {
+                Some(c.parse::<FileCategory>().map_err(|e| anyhow::anyhow!(e))?)
+            } else {
+                None
+            };
+
+            let records = db.list(status_filter, category_filter)?;
+            if records.is_empty() {
+                println!("No downloads found matching criteria.");
+                return Ok(());
             }
 
-            let (tx, mut rx) = mpsc::unbounded_channel::<DownloadEvent>();
+            println!(
+                "{:<4} {:<13} {:<12} {:<24} {:<10} FILENAME",
+                "ID", "STATUS", "CATEGORY", "PROGRESS", "PRIORITY"
+            );
+            println!("{}", "-".repeat(80));
 
-            let progress_task = tokio::spawn(async move {
-                let mut pb: Option<ProgressBar> = None;
+            for r in records {
+                let progress_str = match r.total_bytes {
+                    Some(total) if total > 0 => {
+                        let pct = (r.downloaded_bytes as f64 / total as f64) * 100.0;
+                        format!(
+                            "{}/{} ({:.1}%)",
+                            format_bytes(r.downloaded_bytes),
+                            format_bytes(total),
+                            pct
+                        )
+                    }
+                    Some(total) => {
+                        format!(
+                            "{}/{}",
+                            format_bytes(r.downloaded_bytes),
+                            format_bytes(total)
+                        )
+                    }
+                    None => format!("{}/?", format_bytes(r.downloaded_bytes)),
+                };
 
-                while let Some(event) = rx.recv().await {
-                    match event {
-                        DownloadEvent::Started {
-                            filename,
-                            total_bytes,
-                        } => {
-                            let bar = match total_bytes {
-                                Some(total) => {
-                                    let b = ProgressBar::new(total);
-                                    let style = ProgressStyle::default_bar()
-                                        .template("{msg}\n[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) {bytes_per_sec}")
-                                        .unwrap_or_else(|_| ProgressStyle::default_bar())
-                                        .progress_chars("#>-");
-                                    b.set_style(style);
-                                    b
+                println!(
+                    "{:<4} {:<13} {:<12} {:<24} {:<10} {}",
+                    r.id,
+                    r.status.as_str(),
+                    r.category.to_string(),
+                    progress_str,
+                    r.priority,
+                    r.filename
+                );
+            }
+        }
+
+        Commands::Pause { id } => {
+            let db = get_database()?;
+            let rec = db
+                .get(id)?
+                .ok_or_else(|| anyhow::anyhow!("Download #{id} not found"))?;
+            db.update_status(id, DownloadStatus::Paused, None)?;
+            println!("Download #{id} ({}) paused.", rec.filename);
+        }
+
+        Commands::Resume { target, limit_rate } => {
+            if let Ok(id) = target.parse::<u64>() {
+                let db = get_database()?;
+                let rec = db
+                    .get(id)?
+                    .ok_or_else(|| anyhow::anyhow!("Download #{id} not found"))?;
+                if rec.status == DownloadStatus::Completed {
+                    println!("Download #{id} ({}) is already completed.", rec.filename);
+                    return Ok(());
+                }
+                db.update_status(id, DownloadStatus::Queued, None)?;
+                println!("Download #{id} ({}) resumed and queued.", rec.filename);
+                println!("Run 'tenun run' to process downloads if manager is not already running.");
+            } else {
+                let state_file = PathBuf::from(&target);
+                if !state_file.exists() {
+                    anyhow::bail!(
+                        "State file '{}' does not exist (or invalid download ID)",
+                        target
+                    );
+                }
+
+                let (tx, mut rx) = mpsc::unbounded_channel::<DownloadEvent>();
+
+                let progress_task = tokio::spawn(async move {
+                    let mut pb: Option<ProgressBar> = None;
+
+                    while let Some(event) = rx.recv().await {
+                        match event {
+                            DownloadEvent::Started {
+                                filename,
+                                total_bytes,
+                            } => {
+                                let bar = match total_bytes {
+                                    Some(total) => {
+                                        let b = ProgressBar::new(total);
+                                        let style = ProgressStyle::default_bar()
+                                            .template("{msg}\n[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) {bytes_per_sec}")
+                                            .unwrap_or_else(|_| ProgressStyle::default_bar())
+                                            .progress_chars("#>-");
+                                        b.set_style(style);
+                                        b
+                                    }
+                                    None => {
+                                        let b = ProgressBar::new_spinner();
+                                        let style = ProgressStyle::default_spinner()
+                                            .template(
+                                                "{msg}\n[{elapsed_precise}] {bytes} ({bytes_per_sec})",
+                                            )
+                                            .unwrap_or_else(|_| ProgressStyle::default_spinner());
+                                        b.set_style(style);
+                                        b
+                                    }
+                                };
+                                bar.set_message(format!("Resuming {filename}"));
+                                pb = Some(bar);
+                            }
+                            DownloadEvent::Progress {
+                                downloaded_bytes, ..
+                            } => {
+                                if let Some(ref b) = pb {
+                                    b.set_position(downloaded_bytes);
                                 }
-                                None => {
-                                    let b = ProgressBar::new_spinner();
-                                    let style = ProgressStyle::default_spinner()
-                                        .template(
-                                            "{msg}\n[{elapsed_precise}] {bytes} ({bytes_per_sec})",
-                                        )
-                                        .unwrap_or_else(|_| ProgressStyle::default_spinner());
-                                    b.set_style(style);
-                                    b
+                            }
+                            DownloadEvent::Finished { path, total_bytes } => {
+                                if let Some(b) = pb.take() {
+                                    b.finish_with_message(format!(
+                                        "Saved {} ({} bytes)",
+                                        path.display(),
+                                        total_bytes
+                                    ));
                                 }
-                            };
-                            bar.set_message(format!("Resuming {filename}"));
-                            pb = Some(bar);
-                        }
-                        DownloadEvent::Progress {
-                            downloaded_bytes, ..
-                        } => {
-                            if let Some(ref b) = pb {
-                                b.set_position(downloaded_bytes);
                             }
                         }
-                        DownloadEvent::Finished { path, total_bytes } => {
-                            if let Some(b) = pb.take() {
-                                b.finish_with_message(format!(
-                                    "Saved {} ({} bytes)",
+                    }
+                });
+
+                info!("Resuming download from state: {}", state_file.display());
+                let opts_override = limit_rate.map(|r| RequestOptions {
+                    limit_rate: Some(r),
+                    ..Default::default()
+                });
+
+                let res = resume_download_with_options(
+                    &state_file,
+                    Some(tx),
+                    cancel_token,
+                    opts_override.as_ref(),
+                )
+                .await;
+                let _ = progress_task.await;
+
+                match res {
+                    Ok(path) => println!("Download resumed and completed: {}", path.display()),
+                    Err(TenunError::DownloadPaused) => {
+                        println!(
+                            "Download paused cleanly. You can resume again using 'tenun resume'."
+                        );
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+
+        Commands::Cancel { id } => {
+            let db = get_database()?;
+            let rec = db
+                .get(id)?
+                .ok_or_else(|| anyhow::anyhow!("Download #{id} not found"))?;
+            db.update_status(id, DownloadStatus::Cancelled, None)?;
+            println!("Download #{id} ({}) cancelled.", rec.filename);
+        }
+
+        Commands::Remove { id, delete_file } => {
+            let db = get_database()?;
+            let rec = db
+                .get(id)?
+                .ok_or_else(|| anyhow::anyhow!("Download #{id} not found"))?;
+            if delete_file {
+                let dest = std::path::Path::new(&rec.dest_dir);
+                let target = dest.join(&rec.filename);
+                let part = dest.join(format!("{}.part", rec.filename));
+                let state = dest.join(format!("{}.tenun", rec.filename));
+
+                let _ = std::fs::remove_file(target);
+                let _ = std::fs::remove_file(part);
+                let _ = std::fs::remove_file(state);
+            }
+            db.delete(id)?;
+            if delete_file {
+                println!(
+                    "Download #{id} ({}) deleted from database and disk.",
+                    rec.filename
+                );
+            } else {
+                println!("Download #{id} ({}) removed from database.", rec.filename);
+            }
+        }
+
+        Commands::Run {
+            concurrent,
+            limit_rate,
+        } => {
+            let app_dirs = AppDirectories::detect().context("Failed to detect app directories")?;
+            let db = get_database()?;
+            let config = DownloadManagerConfig {
+                max_concurrent_downloads: concurrent.max(1),
+                global_speed_limit: limit_rate,
+                default_download_dir: app_dirs.download_dir().to_path_buf(),
+            };
+
+            let manager = DownloadManager::new(db, config)?;
+            let mut subscriber = manager.subscribe();
+
+            println!("Tenun Download Manager running.");
+            println!("  Max concurrent:     {}", concurrent.max(1));
+            if let Some(limit) = limit_rate {
+                println!("  Global speed limit: {}", format_bytes(limit));
+            }
+            println!("Press Ctrl+C to stop.");
+            println!("{}", "-".repeat(60));
+
+            let mut last_progress_print = std::collections::HashMap::new();
+
+            loop {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        println!("\nStopping Download Manager...");
+                        manager.shutdown().await;
+                        println!("Download Manager stopped.");
+                        break;
+                    }
+                    Ok(event) = subscriber.recv() => {
+                        match event {
+                            ManagerEvent::Added { id, filename, .. } => {
+                                println!("[+] Added #{id}: {filename}");
+                            }
+                            ManagerEvent::StatusChanged { id, status } => {
+                                println!("[*] #{id} -> {status}");
+                            }
+                            ManagerEvent::Progress {
+                                id,
+                                downloaded_bytes,
+                                total_bytes,
+                                speed_bytes_per_sec,
+                            } => {
+                                let now = std::time::Instant::now();
+                                let should_print = match last_progress_print.get(&id) {
+                                    Some(&last) => now.duration_since(last) >= std::time::Duration::from_secs(1),
+                                    None => true,
+                                };
+                                if should_print {
+                                    last_progress_print.insert(id, now);
+                                    let total_str = total_bytes.map(format_bytes).unwrap_or_else(|| "?".to_string());
+                                    let speed_str = format_speed(speed_bytes_per_sec);
+                                    let pct = total_bytes
+                                        .map(|t| if t > 0 { (downloaded_bytes as f64 / t as f64) * 100.0 } else { 0.0 })
+                                        .unwrap_or(0.0);
+                                    println!(
+                                        "[>] #{id} {:>6.1}% | {} / {} ({})",
+                                        pct,
+                                        format_bytes(downloaded_bytes),
+                                        total_str,
+                                        speed_str
+                                    );
+                                }
+                            }
+                            ManagerEvent::Finished { id, path, total_bytes } => {
+                                println!(
+                                    "[✓] #{id} Finished: {} ({})",
                                     path.display(),
-                                    total_bytes
-                                ));
+                                    format_bytes(total_bytes)
+                                );
+                            }
+                            ManagerEvent::Failed { id, error } => {
+                                eprintln!("[✗] #{id} Failed: {error}");
+                            }
+                            ManagerEvent::Paused { id } => {
+                                println!("[-] #{id} Paused");
+                            }
+                            ManagerEvent::Cancelled { id } => {
+                                println!("[-] #{id} Cancelled");
+                            }
+                            ManagerEvent::Removed { id } => {
+                                println!("[-] #{id} Removed");
                             }
                         }
                     }
                 }
-            });
-
-            info!("Resuming download from state: {}", state_file.display());
-            let opts_override = limit_rate.map(|r| RequestOptions {
-                limit_rate: Some(r),
-                ..Default::default()
-            });
-
-            let res = resume_download_with_options(
-                &state_file,
-                Some(tx),
-                cancel_token,
-                opts_override.as_ref(),
-            )
-            .await;
-            let _ = progress_task.await;
-
-            match res {
-                Ok(path) => println!("Download resumed and completed: {}", path.display()),
-                Err(TenunError::DownloadPaused) => {
-                    println!("Download paused cleanly. You can resume again using 'tenun resume'.");
-                }
-                Err(e) => return Err(e.into()),
             }
         }
 
@@ -562,5 +964,139 @@ mod tests {
             }
             _ => panic!("Expected Commands::Verify"),
         }
+    }
+
+    #[test]
+    fn test_cli_add_parsing() {
+        let args = [
+            "tenun",
+            "add",
+            "https://example.com/archive.zip",
+            "--output",
+            "/tmp/downloads",
+            "--connections",
+            "16",
+            "--priority",
+            "5",
+            "--category",
+            "compressed",
+            "--start-now",
+        ];
+        let parsed = Cli::try_parse_from(args).expect("valid parse");
+        match parsed.command {
+            Commands::Add {
+                url,
+                output,
+                connections,
+                priority,
+                category,
+                start_now,
+            } => {
+                assert_eq!(url, "https://example.com/archive.zip");
+                assert_eq!(output, Some(PathBuf::from("/tmp/downloads")));
+                assert_eq!(connections, Some(16));
+                assert_eq!(priority, 5);
+                assert_eq!(category.as_deref(), Some("compressed"));
+                assert!(start_now);
+            }
+            _ => panic!("Expected Commands::Add"),
+        }
+    }
+
+    #[test]
+    fn test_cli_list_parsing() {
+        let args = [
+            "tenun",
+            "list",
+            "--status",
+            "Downloading",
+            "--category",
+            "video",
+        ];
+        let parsed = Cli::try_parse_from(args).expect("valid parse");
+        match parsed.command {
+            Commands::List { status, category } => {
+                assert_eq!(status.as_deref(), Some("Downloading"));
+                assert_eq!(category.as_deref(), Some("video"));
+            }
+            _ => panic!("Expected Commands::List"),
+        }
+    }
+
+    #[test]
+    fn test_cli_pause_resume_cancel_remove_parsing() {
+        // Pause
+        let p = Cli::try_parse_from(["tenun", "pause", "42"]).expect("parse pause");
+        match p.command {
+            Commands::Pause { id } => assert_eq!(id, 42),
+            _ => panic!("Expected Pause"),
+        }
+
+        // Resume ID
+        let r1 = Cli::try_parse_from(["tenun", "resume", "42"]).expect("parse resume ID");
+        match r1.command {
+            Commands::Resume { target, limit_rate } => {
+                assert_eq!(target, "42");
+                assert!(limit_rate.is_none());
+            }
+            _ => panic!("Expected Resume"),
+        }
+
+        // Resume state file with rate
+        let r2 = Cli::try_parse_from(["tenun", "resume", "file.iso.tenun", "--limit-rate", "1M"])
+            .expect("parse resume state");
+        match r2.command {
+            Commands::Resume { target, limit_rate } => {
+                assert_eq!(target, "file.iso.tenun");
+                assert_eq!(limit_rate, Some(1024 * 1024));
+            }
+            _ => panic!("Expected Resume"),
+        }
+
+        // Cancel
+        let c = Cli::try_parse_from(["tenun", "cancel", "42"]).expect("parse cancel");
+        match c.command {
+            Commands::Cancel { id } => assert_eq!(id, 42),
+            _ => panic!("Expected Cancel"),
+        }
+
+        // Remove
+        let rm =
+            Cli::try_parse_from(["tenun", "remove", "42", "--delete-file"]).expect("parse remove");
+        match rm.command {
+            Commands::Remove { id, delete_file } => {
+                assert_eq!(id, 42);
+                assert!(delete_file);
+            }
+            _ => panic!("Expected Remove"),
+        }
+    }
+
+    #[test]
+    fn test_cli_run_parsing() {
+        let args = ["tenun", "run", "--concurrent", "5", "--limit-rate", "2MB"];
+        let parsed = Cli::try_parse_from(args).expect("valid parse");
+        match parsed.command {
+            Commands::Run {
+                concurrent,
+                limit_rate,
+            } => {
+                assert_eq!(concurrent, 5);
+                assert_eq!(limit_rate, Some(2 * 1024 * 1024));
+            }
+            _ => panic!("Expected Commands::Run"),
+        }
+    }
+
+    #[test]
+    fn test_format_bytes_and_speed() {
+        assert_eq!(format_bytes(500), "500 B");
+        assert_eq!(format_bytes(2048), "2.00 KiB");
+        assert_eq!(format_bytes(5 * 1024 * 1024), "5.00 MiB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.00 GiB");
+
+        assert_eq!(format_speed(500.0), "500 B/s");
+        assert_eq!(format_speed(1024.0 * 2.5), "2.50 KB/s");
+        assert_eq!(format_speed(1024.0 * 1024.0 * 3.75), "3.75 MB/s");
     }
 }

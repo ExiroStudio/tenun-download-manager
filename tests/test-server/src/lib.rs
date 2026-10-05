@@ -2,8 +2,8 @@
 
 use axum::{
     body::Body,
-    extract::State,
-    http::{header, HeaderMap, StatusCode},
+    extract::{Path, State},
+    http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Router,
@@ -100,6 +100,7 @@ impl TestServer {
         let app_state = Arc::clone(&config_arc);
         let app = Router::new()
             .route("/download", get(handle_download).head(handle_download))
+            .route("/file/{id}", get(handle_file_by_id).head(handle_file_by_id))
             .with_state(app_state);
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -123,6 +124,11 @@ impl TestServer {
     /// Base download URL.
     pub fn download_url(&self) -> String {
         format!("http://{}/download", self.addr)
+    }
+
+    /// Dynamic file download URL by identifier or filename.
+    pub fn file_url(&self, id: &str) -> String {
+        format!("http://{}/file/{}", self.addr, id)
     }
 
     /// Server network address.
@@ -387,4 +393,72 @@ fn parse_range_header(range_str: &str, total: usize) -> Option<RangeResult> {
 
         Some(RangeResult::Satisfiable { start, end })
     }
+}
+
+/// Deterministically generates pseudo-random payload bytes for test files.
+pub fn generate_file_content(id: &str, len: usize) -> Vec<u8> {
+    let seed = id
+        .bytes()
+        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    let mut data = Vec::with_capacity(len);
+    let mut state = seed.wrapping_add(1);
+    for _ in 0..len {
+        state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+        data.push((state >> 16) as u8);
+    }
+    data
+}
+
+async fn handle_file_by_id(Path(id): Path<String>, method: Method, headers: HeaderMap) -> Response {
+    let file_len = 65_536; // 64 KiB
+    let data = generate_file_content(&id, file_len);
+    let etag = format!("\"etag-{id}\"");
+
+    let mut builder = Response::builder()
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::ETAG, etag)
+        .header(header::ACCEPT_RANGES, "bytes");
+
+    if method == Method::HEAD {
+        return builder
+            .header(header::CONTENT_LENGTH, file_len.to_string())
+            .body(Body::empty())
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    }
+
+    if let Some(range_header) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
+        if let Some(parsed_range) = parse_range_header(range_header, file_len) {
+            match parsed_range {
+                RangeResult::Satisfiable { start, end } => {
+                    let chunk = data[start..=end].to_vec();
+                    let content_range = format!("bytes {}-{}/{}", start, end, file_len);
+                    let content_len = (end - start + 1).to_string();
+
+                    builder = builder
+                        .header(header::CONTENT_RANGE, content_range)
+                        .header(header::CONTENT_LENGTH, content_len);
+
+                    return create_throttled_response(
+                        builder,
+                        StatusCode::PARTIAL_CONTENT,
+                        chunk,
+                        None,
+                        None,
+                        None,
+                    );
+                }
+                RangeResult::Unsatisfiable => {
+                    let content_range = format!("bytes */{}", file_len);
+                    return Response::builder()
+                        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                        .header(header::CONTENT_RANGE, content_range)
+                        .body(Body::empty())
+                        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+                }
+            }
+        }
+    }
+
+    builder = builder.header(header::CONTENT_LENGTH, file_len.to_string());
+    create_throttled_response(builder, StatusCode::OK, data, None, None, None)
 }
