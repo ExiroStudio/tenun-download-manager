@@ -4896,7 +4896,12 @@ name = "tenun-core"
 version = "0.1.0"
 dependencies = [
  "directories",
+ "percent-encoding",
+ "reqwest",
+ "serde",
+ "serde_json",
  "tempfile",
+ "tenun-test-server",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
