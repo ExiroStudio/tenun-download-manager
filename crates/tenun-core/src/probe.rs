@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use std::time::Duration;
 
-/// Configuration options for HTTP requests.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Configuration options for HTTP requests and download behavior.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestOptions {
     /// Custom headers to include in every request.
     pub custom_headers: Vec<(String, String)>,
@@ -26,6 +26,29 @@ pub struct RequestOptions {
     pub proxy: Option<String>,
     /// Timeout duration for requests.
     pub timeout: Option<Duration>,
+    /// Number of concurrent connection segments requested (default: 8, max: 32).
+    pub connections: Option<usize>,
+    /// Minimum size in bytes per segment (default: 1 MiB).
+    pub min_segment_size: Option<u64>,
+    /// Force HTTP/1.1 connections to prevent multiplexing into a single TCP stream.
+    pub http1_only: bool,
+}
+
+impl Default for RequestOptions {
+    fn default() -> Self {
+        Self {
+            custom_headers: Vec::new(),
+            user_agent: None,
+            referer: None,
+            cookie: None,
+            basic_auth: None,
+            proxy: None,
+            timeout: None,
+            connections: Some(crate::segment::DEFAULT_CONNECTIONS),
+            min_segment_size: Some(crate::segment::DEFAULT_MIN_SEGMENT_SIZE),
+            http1_only: true,
+        }
+    }
 }
 
 /// Metadata discovered about a remote file before downloading.
@@ -58,6 +81,10 @@ pub fn build_client(opts: &RequestOptions) -> Result<Client> {
         .no_deflate()
         .no_zstd()
         .redirect(reqwest::redirect::Policy::limited(10));
+
+    if opts.http1_only {
+        builder = builder.http1_only();
+    }
 
     if let Some(ref ua) = opts.user_agent {
         builder = builder.user_agent(ua);
@@ -157,7 +184,6 @@ async fn process_probe_response(original_url: &str, response: Response) -> Resul
             (false, total)
         }
         StatusCode::RANGE_NOT_SATISFIABLE => {
-            // Check if file is 0 bytes (Content-Range: bytes */0)
             if let Some(cr) = headers
                 .get(header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok())
@@ -196,7 +222,6 @@ async fn process_probe_response(original_url: &str, response: Response) -> Resul
 
 fn parse_content_range_total(headers: &HeaderMap) -> Option<u64> {
     let cr = headers.get(header::CONTENT_RANGE)?.to_str().ok()?;
-    // Format: bytes 0-0/12345 or bytes 0-0/*
     let (_, total_str) = cr.split_once('/')?;
     let total_str = total_str.trim();
     if total_str == "*" {
@@ -243,7 +268,6 @@ pub fn parse_content_disposition(header_val: &str) -> Option<String> {
         let trimmed = part.trim();
         if let Some(val) = trimmed.strip_prefix("filename*=") {
             let val = val.trim().trim_matches('"');
-            // Format: charset'lang'percent_encoded
             if let Some((_, encoded)) = val.split_once("''") {
                 let decoded = percent_decode_str(encoded).decode_utf8_lossy().to_string();
                 extended_filename = Some(decoded);
