@@ -16,6 +16,7 @@ authors = ["Rega Fahri Saputra <codingmaster.exe@gmail.com>"]
 [workspace.dependencies]
 # Internal crates
 tenun-core = { path = "crates/tenun-core" }
+tenun-test-server = { path = "tests/test-server" }
 
 # Async runtime & networking
 tokio = { version = "1.43", features = ["full"] }
@@ -23,6 +24,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-
 axum = "0.8"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "trace"] }
+percent-encoding = "2.3"
+
+# CLI & UX
+clap = { version = "4.5", features = ["derive"] }
+indicatif = "0.17"
 
 # Error handling & logging
 thiserror = "2.0"

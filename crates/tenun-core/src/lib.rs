@@ -5,11 +5,15 @@
 //! including probing, segmented downloads, resuming, queuing, and data integrity verification.
 
 pub mod config;
+pub mod download;
 pub mod error;
 pub mod logging;
 pub mod platform;
+pub mod probe;
 
 pub use config::AppDirectories;
+pub use download::{download_single, resolve_unique_filename, DownloadEvent};
 pub use error::{Result, TenunError};
 pub use logging::init_logging;
 pub use platform::{atomic_rename_file, sanitize_filename, sync_file, PositionalWrite};
+pub use probe::{apply_options, build_client, probe, RemoteInfo, RequestOptions};

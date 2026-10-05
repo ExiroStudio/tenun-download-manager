@@ -14,3 +14,5 @@ tenun-core = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+clap = { workspace = true }
+indicatif = { workspace = true }
