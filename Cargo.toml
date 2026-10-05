@@ -1,0 +1,43 @@
+[workspace]
+members = [
+    "crates/tenun-core",
+    "crates/tenun-cli",
+    "crates/tenun-ui",
+    "tests/test-server",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["Rega Fahri Saputra <codingmaster.exe@gmail.com>"]
+
+[workspace.dependencies]
+# Internal crates
+tenun-core = { path = "crates/tenun-core" }
+
+# Async runtime & networking
+tokio = { version = "1.43", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+
+# Error handling & logging
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serialization & config
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+directories = "6.0"
+
+# Testing utilities
+tempfile = "3.16"
+
+# UI
+slint = "1.18"
+slint-build = "1.18"
