@@ -5064,6 +5064,8 @@ dependencies = [
  "bytes",
  "http",
  "reqwest",
+ "tempfile",
+ "tenun-core",
  "tokio",
  "tracing",
 ]
