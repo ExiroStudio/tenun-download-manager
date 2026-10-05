@@ -5,11 +5,69 @@ use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 use tenun_core::{
-    download_segmented_with_cancel, init_logging, resume_download, AppDirectories,
+    download_segmented_with_cancel, init_logging, resume_download_with_options, AppDirectories,
     CancellationToken, DownloadEvent, RequestOptions, TenunError,
 };
 use tokio::sync::mpsc;
 use tracing::info;
+
+/// Parses human-friendly bandwidth strings like `500K`, `1M`, `2MB`, `1048576`.
+fn parse_rate_limit(s: &str) -> std::result::Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("Rate limit string cannot be empty".to_string());
+    }
+
+    let upper = s.to_ascii_uppercase();
+    if upper.ends_with("KIB") || upper.ends_with("KB") {
+        let num_str = upper.trim_end_matches("KIB").trim_end_matches("KB").trim();
+        let num: f64 = num_str
+            .parse()
+            .map_err(|e| format!("Invalid rate number: {e}"))?;
+        Ok((num * 1024.0) as u64)
+    } else if upper.ends_with('K') {
+        let num_str = upper.trim_end_matches('K').trim();
+        let num: f64 = num_str
+            .parse()
+            .map_err(|e| format!("Invalid rate number: {e}"))?;
+        Ok((num * 1024.0) as u64)
+    } else if upper.ends_with("MIB") || upper.ends_with("MB") {
+        let num_str = upper.trim_end_matches("MIB").trim_end_matches("MB").trim();
+        let num: f64 = num_str
+            .parse()
+            .map_err(|e| format!("Invalid rate number: {e}"))?;
+        Ok((num * 1024.0 * 1024.0) as u64)
+    } else if upper.ends_with('M') {
+        let num_str = upper.trim_end_matches('M').trim();
+        let num: f64 = num_str
+            .parse()
+            .map_err(|e| format!("Invalid rate number: {e}"))?;
+        Ok((num * 1024.0 * 1024.0) as u64)
+    } else if upper.ends_with("GIB") || upper.ends_with("GB") {
+        let num_str = upper.trim_end_matches("GIB").trim_end_matches("GB").trim();
+        let num: f64 = num_str
+            .parse()
+            .map_err(|e| format!("Invalid rate number: {e}"))?;
+        Ok((num * 1024.0 * 1024.0 * 1024.0) as u64)
+    } else if upper.ends_with('G') {
+        let num_str = upper.trim_end_matches('G').trim();
+        let num: f64 = num_str
+            .parse()
+            .map_err(|e| format!("Invalid rate number: {e}"))?;
+        Ok((num * 1024.0 * 1024.0 * 1024.0) as u64)
+    } else if upper.ends_with('B') {
+        let num_str = upper.trim_end_matches('B').trim();
+        let num: u64 = num_str
+            .parse()
+            .map_err(|e| format!("Invalid rate number: {e}"))?;
+        Ok(num)
+    } else {
+        let num: u64 = upper
+            .parse()
+            .map_err(|e| format!("Invalid rate number: {e}"))?;
+        Ok(num)
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "tenun", version, about = "Fast and resilient download manager")]
@@ -44,12 +102,20 @@ enum Commands {
         /// Cookie header
         #[arg(long)]
         cookie: Option<String>,
+
+        /// Maximum bandwidth rate limit (e.g. 500K, 1M, 2MB, 1048576)
+        #[arg(long, value_parser = parse_rate_limit)]
+        limit_rate: Option<u64>,
     },
 
     /// Resume an interrupted or paused download from a .tenun state file
     Resume {
         /// Path to the .tenun state file
         state_file: PathBuf,
+
+        /// Maximum bandwidth rate limit override (e.g. 500K, 1M, 2MB)
+        #[arg(long, value_parser = parse_rate_limit)]
+        limit_rate: Option<u64>,
     },
 }
 
@@ -79,6 +145,7 @@ async fn main() -> Result<()> {
             user_agent,
             referer,
             cookie,
+            limit_rate,
         } => {
             let dest_dir = match output {
                 Some(p) => p,
@@ -99,6 +166,7 @@ async fn main() -> Result<()> {
                 user_agent,
                 referer,
                 cookie,
+                limit_rate,
                 ..Default::default()
             };
 
@@ -174,7 +242,10 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Resume { state_file } => {
+        Commands::Resume {
+            state_file,
+            limit_rate,
+        } => {
             if !state_file.exists() {
                 anyhow::bail!("State file '{}' does not exist", state_file.display());
             }
@@ -235,7 +306,18 @@ async fn main() -> Result<()> {
             });
 
             info!("Resuming download from state: {}", state_file.display());
-            let res = resume_download(&state_file, Some(tx), cancel_token).await;
+            let opts_override = limit_rate.map(|r| RequestOptions {
+                limit_rate: Some(r),
+                ..Default::default()
+            });
+
+            let res = resume_download_with_options(
+                &state_file,
+                Some(tx),
+                cancel_token,
+                opts_override.as_ref(),
+            )
+            .await;
             let _ = progress_task.await;
 
             match res {
@@ -249,4 +331,23 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_rate_limit() {
+        assert_eq!(parse_rate_limit("500K").unwrap(), 500 * 1024);
+        assert_eq!(parse_rate_limit("500KB").unwrap(), 500 * 1024);
+        assert_eq!(parse_rate_limit("500kib").unwrap(), 500 * 1024);
+        assert_eq!(parse_rate_limit("1M").unwrap(), 1024 * 1024);
+        assert_eq!(parse_rate_limit("2MB").unwrap(), 2 * 1024 * 1024);
+        assert_eq!(parse_rate_limit("1G").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_rate_limit("1048576").unwrap(), 1048576);
+        assert_eq!(parse_rate_limit("1024B").unwrap(), 1024);
+        assert!(parse_rate_limit("").is_err());
+        assert!(parse_rate_limit("invalid").is_err());
+    }
 }

@@ -1,16 +1,21 @@
 //! Downloading engines: single-stream, multi-segment, and crash-resilient resumable downloads.
 
 use crate::error::{Result, TenunError};
+use crate::limiter::TokenBucketLimiter;
 use crate::platform::{atomic_rename_file, sync_file, PositionalWrite};
 use crate::probe::{apply_options, build_client, probe, RequestOptions};
-use crate::segment::{calculate_segments, DEFAULT_CONNECTIONS, DEFAULT_MIN_SEGMENT_SIZE};
-use crate::state::{load_state, save_state_atomic, DownloadState};
+use crate::retry::{classify_reqwest_error, classify_response, ErrorKind, RetryPolicy};
+use crate::segment::{
+    calculate_segments, DynamicSegment, Segment, SegmentManager, DEFAULT_CONNECTIONS,
+    DEFAULT_MIN_SEGMENT_SIZE,
+};
+use crate::state::{load_state, save_state_atomic, DownloadState, SegmentState};
 use reqwest::header::{self, HeaderValue};
 use reqwest::StatusCode;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::UnboundedSender;
@@ -18,8 +23,6 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-/// Buffer size per positional write operation (256 KiB).
-pub const WRITE_BUFFER_CAPACITY: usize = 256 * 1024;
 /// Periodic checkpoint interval (2 seconds).
 pub const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -111,6 +114,9 @@ pub async fn download_single(
         });
     }
 
+    let limiter = opts.limit_rate.map(TokenBucketLimiter::new);
+    let policy = opts.retry_policy.clone().unwrap_or_default();
+
     let mut req = client.get(&remote_info.final_url);
     req = apply_options(req, opts)?;
 
@@ -133,29 +139,42 @@ pub async fn download_single(
     {
         let mut file = File::create(&part_path).map_err(TenunError::Io)?;
 
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|e| TenunError::Network(e.to_string()))?
-        {
-            file.write_all(&chunk).map_err(TenunError::Io)?;
-            downloaded += chunk.len() as u64;
+        loop {
+            let chunk_res = tokio::time::timeout(policy.stall_timeout, response.chunk()).await;
+            match chunk_res {
+                Ok(Ok(Some(chunk))) => {
+                    if let Some(ref lim) = limiter {
+                        lim.acquire(chunk.len()).await;
+                    }
 
-            let elapsed = last_tick.elapsed();
-            if elapsed >= Duration::from_millis(200) {
-                let bytes_in_interval = downloaded - last_downloaded;
-                let speed = (bytes_in_interval as f64) / elapsed.as_secs_f64();
+                    file.write_all(&chunk).map_err(TenunError::Io)?;
+                    downloaded += chunk.len() as u64;
 
-                if let Some(ref tx) = event_tx {
-                    let _ = tx.send(DownloadEvent::Progress {
-                        downloaded_bytes: downloaded,
-                        total_bytes: remote_info.total_bytes,
-                        speed_bytes_per_sec: speed,
-                    });
+                    let elapsed = last_tick.elapsed();
+                    if elapsed >= Duration::from_millis(200) {
+                        let bytes_in_interval = downloaded - last_downloaded;
+                        let speed = (bytes_in_interval as f64) / elapsed.as_secs_f64();
+
+                        if let Some(ref tx) = event_tx {
+                            let _ = tx.send(DownloadEvent::Progress {
+                                downloaded_bytes: downloaded,
+                                total_bytes: remote_info.total_bytes,
+                                speed_bytes_per_sec: speed,
+                            });
+                        }
+
+                        last_tick = Instant::now();
+                        last_downloaded = downloaded;
+                    }
                 }
-
-                last_tick = Instant::now();
-                last_downloaded = downloaded;
+                Ok(Ok(None)) => break,
+                Ok(Err(e)) => return Err(TenunError::Network(e.to_string())),
+                Err(_) => {
+                    return Err(TenunError::Network(format!(
+                        "Download stalled: no data received for {:?}",
+                        policy.stall_timeout
+                    )));
+                }
             }
         }
 
@@ -243,9 +262,9 @@ pub async fn download_segmented_with_cancel(
 
     base_file.set_len(total_size).map_err(TenunError::Io)?;
     sync_file(&base_file).map_err(TenunError::Io)?;
+    drop(base_file);
 
-    // Create and save initial state file
-    let mut initial_state =
+    let initial_state =
         DownloadState::from_remote_info(&remote_info, &final_filename, &segments, opts);
     save_state_atomic(&state_path, &initial_state)?;
 
@@ -256,243 +275,45 @@ pub async fn download_segmented_with_cancel(
         });
     }
 
-    // Atomic progress tracking per segment
-    let segment_counters: Arc<Vec<Arc<AtomicU64>>> = Arc::new(
-        segments
-            .iter()
-            .map(|_| Arc::new(AtomicU64::new(0)))
-            .collect(),
-    );
+    let segment_manager = SegmentManager::new(&segments);
 
-    let is_running = Arc::new(AtomicBool::new(true));
-
-    // Periodic checkpoint & progress aggregation task
-    let checkpoint_join_handle = {
-        let counters = Arc::clone(&segment_counters);
-        let tx = event_tx.clone();
-        let running = Arc::clone(&is_running);
-        let s_path = state_path.clone();
-        let mut state = initial_state.clone();
-
-        tokio::spawn(async move {
-            let mut last_tick = Instant::now();
-            let mut last_checkpoint = Instant::now();
-            let mut last_downloaded = 0u64;
-
-            while running.load(Ordering::Relaxed) {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-
-                let downloaded: u64 = counters.iter().map(|c| c.load(Ordering::Relaxed)).sum();
-                let elapsed = last_tick.elapsed();
-
-                if elapsed.as_secs_f64() > 0.0 {
-                    let bytes_in_interval = downloaded.saturating_sub(last_downloaded);
-                    let speed = (bytes_in_interval as f64) / elapsed.as_secs_f64();
-
-                    if let Some(ref sender) = tx {
-                        let _ = sender.send(DownloadEvent::Progress {
-                            downloaded_bytes: downloaded,
-                            total_bytes: Some(total_size),
-                            speed_bytes_per_sec: speed,
-                        });
-                    }
-
-                    last_tick = Instant::now();
-                    last_downloaded = downloaded;
-                }
-
-                // Checkpoint every CHECKPOINT_INTERVAL
-                if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
-                    for (i, c) in counters.iter().enumerate() {
-                        state.segments[i].downloaded = c.load(Ordering::Relaxed);
-                    }
-                    state.updated_at = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    let _ = save_state_atomic(&s_path, &state);
-                    last_checkpoint = Instant::now();
-                }
-            }
-        })
-    };
-
-    // Spawn download worker tasks
-    let mut workers = JoinSet::new();
-
-    for (idx, seg) in segments.iter().cloned().enumerate() {
-        let worker_client = client.clone();
-        let worker_file = base_file.try_clone().map_err(TenunError::Io)?;
-        let worker_opts = opts.clone();
-        let final_url = remote_info.final_url.clone();
-        let counter = Arc::clone(&segment_counters[idx]);
-        let token = cancel_token.clone();
-
-        workers.spawn(async move {
-            let range_val = format!("bytes={}-{}", seg.start, seg.end);
-            let mut req = worker_client
-                .get(&final_url)
-                .header(header::RANGE, HeaderValue::from_str(&range_val).unwrap());
-            req = apply_options(req, &worker_opts)?;
-
-            let mut response = req
-                .send()
-                .await
-                .map_err(|e| TenunError::Network(e.to_string()))?;
-
-            let status = response.status();
-
-            if status == StatusCode::OK {
-                warn!(
-                    "Server replied 200 OK for Range request on segment {}",
-                    seg.id
-                );
-                return Err(TenunError::RangeNotSupported);
-            }
-
-            if status != StatusCode::PARTIAL_CONTENT {
-                return Err(TenunError::Network(format!(
-                    "Segment {} failed with HTTP status {}",
-                    seg.id, status
-                )));
-            }
-
-            let mut write_buf = Vec::with_capacity(WRITE_BUFFER_CAPACITY);
-            let mut buf_offset = seg.start;
-            let mut seg_downloaded = 0u64;
-
-            while !token.is_cancelled() {
-                match response.chunk().await {
-                    Ok(Some(chunk)) => {
-                        write_buf.extend_from_slice(&chunk);
-
-                        if write_buf.len() >= WRITE_BUFFER_CAPACITY {
-                            worker_file
-                                .write_all_at(&write_buf, buf_offset)
-                                .map_err(TenunError::Io)?;
-                            buf_offset += write_buf.len() as u64;
-                            seg_downloaded += write_buf.len() as u64;
-                            counter.store(seg_downloaded, Ordering::Relaxed);
-                            write_buf.clear();
-                        }
-                    }
-                    Ok(None) => break, // Reached end of segment stream
-                    Err(e) => return Err(TenunError::Network(e.to_string())),
-                }
-            }
-
-            if !write_buf.is_empty() {
-                worker_file
-                    .write_all_at(&write_buf, buf_offset)
-                    .map_err(TenunError::Io)?;
-                seg_downloaded += write_buf.len() as u64;
-                counter.store(seg_downloaded, Ordering::Relaxed);
-                write_buf.clear();
-            }
-
-            // Sync bytes flushed to disk before segment worker finishes or exits on cancel
-            sync_file(&worker_file).map_err(TenunError::Io)?;
-
-            if token.is_cancelled() {
-                Err(TenunError::DownloadPaused)
-            } else {
-                Ok(())
-            }
-        });
-    }
-
-    // Wait for all workers to complete or handle pause/error
-    let mut fallback_needed = false;
-    let mut paused = false;
-
-    while let Some(res) = workers.join_next().await {
-        match res {
-            Ok(Ok(())) => {}
-            Ok(Err(TenunError::DownloadPaused)) => {
-                paused = true;
-                workers.abort_all();
-            }
-            Ok(Err(TenunError::RangeNotSupported)) => {
-                fallback_needed = true;
-                workers.abort_all();
-                break;
-            }
-            Ok(Err(e)) => {
-                is_running.store(false, Ordering::Relaxed);
-                let _ = checkpoint_join_handle.await;
-                return Err(e);
-            }
-            Err(join_err) => {
-                if paused || fallback_needed || join_err.is_cancelled() {
-                    continue;
-                }
-                is_running.store(false, Ordering::Relaxed);
-                let _ = checkpoint_join_handle.await;
-                return Err(TenunError::Platform(format!(
-                    "Worker task panicked: {join_err}"
-                )));
-            }
-        }
-    }
-
-    is_running.store(false, Ordering::Relaxed);
-    let _ = checkpoint_join_handle.await;
-
-    // Drop base file handle to ensure file unlocks on Windows
-    drop(base_file);
-
-    // Save final state before exiting
-    for (i, c) in segment_counters.iter().enumerate() {
-        initial_state.segments[i].downloaded = c.load(Ordering::Relaxed);
-    }
-    initial_state.updated_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    save_state_atomic(&state_path, &initial_state)?;
-
-    if paused {
-        info!(
-            "Download successfully paused at checkpoint: {}",
-            state_path.display()
-        );
-        return Err(TenunError::DownloadPaused);
-    }
-
-    if fallback_needed {
-        info!("Server returned 200 OK for Range request; switching to single-stream download");
-        let _ = std::fs::remove_file(&part_path);
-        let _ = std::fs::remove_file(&state_path);
-        return download_single(url, dest_dir, opts, event_tx).await;
-    }
-
-    // Finished: rename .part to final and remove sidecar .tenun state file
-    atomic_rename_file(&part_path, &final_path)?;
-    let _ = std::fs::remove_file(&state_path);
-
-    if let Some(ref tx) = event_tx {
-        let _ = tx.send(DownloadEvent::Finished {
-            path: final_path.clone(),
-            total_bytes: total_size,
-        });
-    }
-
-    Ok(final_path)
+    download_multi_segment(
+        part_path,
+        state_path,
+        final_path,
+        total_size,
+        remote_info.final_url,
+        remote_info.etag,
+        segment_manager,
+        opts.clone(),
+        client,
+        initial_state,
+        event_tx,
+        cancel_token,
+        true,
+        url,
+        dest_dir,
+    )
+    .await
 }
 
 /// Resumes an interrupted or paused download from a `.tenun` sidecar state file.
-///
-/// Features:
-/// - Validates `.part` file existence and size.
-/// - Validates remote file using `If-Range` header.
-/// - Resumes each incomplete segment from its saved `downloaded` offset.
-/// - Refuses silent corruption if remote file changed on the server.
 pub async fn resume_download(
     state_path: &Path,
     event_tx: Option<UnboundedSender<DownloadEvent>>,
     cancel_token: CancellationToken,
 ) -> Result<PathBuf> {
-    let mut state = load_state(state_path)?;
+    resume_download_with_options(state_path, event_tx, cancel_token, None).await
+}
+
+/// Resumes an interrupted or paused download with optional request option overrides.
+pub async fn resume_download_with_options(
+    state_path: &Path,
+    event_tx: Option<UnboundedSender<DownloadEvent>>,
+    cancel_token: CancellationToken,
+    opts_override: Option<&RequestOptions>,
+) -> Result<PathBuf> {
+    let state = load_state(state_path)?;
     let dest_dir = state_path.parent().unwrap_or_else(|| Path::new("."));
 
     let part_path = dest_dir.join(format!("{}.part", state.filename));
@@ -513,10 +334,21 @@ pub async fn resume_download(
         )));
     }
 
-    let opts = state.options.to_request_options();
+    let mut opts = state.options.to_request_options();
+    if let Some(over) = opts_override {
+        if over.limit_rate.is_some() {
+            opts.limit_rate = over.limit_rate;
+        }
+        if over.retry_policy.is_some() {
+            opts.retry_policy = over.retry_policy.clone();
+        }
+        if over.user_agent.is_some() {
+            opts.user_agent = over.user_agent.clone();
+        }
+    }
+
     let client = build_client(&opts)?;
 
-    // Validate remote file with If-Range
     info!(
         "Validating remote resource with If-Range: {}",
         state.final_url
@@ -540,7 +372,6 @@ pub async fn resume_download(
     let val_status = validate_res.status();
 
     if val_status == StatusCode::OK {
-        // Server returned 200 OK: the If-Range condition failed, meaning file changed!
         return Err(TenunError::RemoteFileChanged(
             "Server returned 200 OK for If-Range; remote resource was modified".to_string(),
         ));
@@ -553,7 +384,6 @@ pub async fn resume_download(
         )));
     }
 
-    // Double-check ETag if present
     if let Some(ref old_etag) = state.etag {
         if let Some(new_etag) = validate_res
             .headers()
@@ -574,12 +404,6 @@ pub async fn resume_download(
         state.total_bytes
     );
 
-    let base_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&part_path)
-        .map_err(TenunError::Io)?;
-
     if let Some(ref tx) = event_tx {
         let _ = tx.send(DownloadEvent::Started {
             filename: state.filename.clone(),
@@ -587,35 +411,85 @@ pub async fn resume_download(
         });
     }
 
-    // Segment counters initialized with already downloaded bytes
-    let segment_counters: Arc<Vec<Arc<AtomicU64>>> = Arc::new(
-        state
-            .segments
-            .iter()
-            .map(|s| Arc::new(AtomicU64::new(s.downloaded)))
-            .collect(),
-    );
+    let initial_segments: Vec<Segment> = state.segments.iter().map(Segment::from).collect();
+    let segment_manager = SegmentManager::new(&initial_segments);
+
+    download_multi_segment(
+        part_path,
+        state_path.to_path_buf(),
+        final_path,
+        state.total_bytes,
+        state.final_url.clone(),
+        state.etag.clone(),
+        segment_manager,
+        opts,
+        client,
+        state,
+        event_tx,
+        cancel_token,
+        false,
+        "",
+        dest_dir,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn download_multi_segment(
+    part_path: PathBuf,
+    state_path: PathBuf,
+    final_path: PathBuf,
+    total_size: u64,
+    final_url: String,
+    etag: Option<String>,
+    segment_manager: SegmentManager,
+    opts: RequestOptions,
+    client: reqwest::Client,
+    mut initial_state: DownloadState,
+    event_tx: Option<UnboundedSender<DownloadEvent>>,
+    cancel_token: CancellationToken,
+    fallback_on_200: bool,
+    original_url: &str,
+    dest_dir: &Path,
+) -> Result<PathBuf> {
+    let base_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&part_path)
+        .map_err(TenunError::Io)?;
 
     let is_running = Arc::new(AtomicBool::new(true));
+    let limiter = opts
+        .limit_rate
+        .map(|r| Arc::new(TokenBucketLimiter::new(r)));
+    let policy = opts.retry_policy.clone().unwrap_or_default();
+    let min_split = opts.min_segment_size.unwrap_or(DEFAULT_MIN_SEGMENT_SIZE);
 
     // Periodic checkpoint task
     let checkpoint_join_handle = {
-        let counters = Arc::clone(&segment_counters);
+        let seg_mgr = segment_manager.clone();
         let tx = event_tx.clone();
         let running = Arc::clone(&is_running);
-        let s_path = state_path.to_path_buf();
-        let total_size = state.total_bytes;
-        let mut save_state = state.clone();
+        let s_path = state_path.clone();
+        let mut save_state = initial_state.clone();
 
         tokio::spawn(async move {
             let mut last_tick = Instant::now();
             let mut last_checkpoint = Instant::now();
-            let mut last_downloaded = counters.iter().map(|c| c.load(Ordering::Relaxed)).sum();
+            let mut last_downloaded = seg_mgr
+                .segments()
+                .iter()
+                .map(|s| s.current_downloaded())
+                .sum::<u64>();
 
             while running.load(Ordering::Relaxed) {
                 tokio::time::sleep(Duration::from_millis(200)).await;
 
-                let downloaded: u64 = counters.iter().map(|c| c.load(Ordering::Relaxed)).sum();
+                let downloaded: u64 = seg_mgr
+                    .segments()
+                    .iter()
+                    .map(|s| s.current_downloaded())
+                    .sum();
                 let elapsed = last_tick.elapsed();
 
                 if elapsed.as_secs_f64() > 0.0 {
@@ -635,9 +509,11 @@ pub async fn resume_download(
                 }
 
                 if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
-                    for (i, c) in counters.iter().enumerate() {
-                        save_state.segments[i].downloaded = c.load(Ordering::Relaxed);
-                    }
+                    let current_segments = seg_mgr.snapshot();
+                    save_state.segments = current_segments
+                        .into_iter()
+                        .map(SegmentState::from)
+                        .collect();
                     save_state.updated_at = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
@@ -651,92 +527,37 @@ pub async fn resume_download(
 
     let mut workers = JoinSet::new();
 
-    for (idx, seg) in state.segments.iter().cloned().enumerate() {
-        let total_seg_len = seg.end - seg.start + 1;
-        if seg.downloaded >= total_seg_len {
-            // Segment already 100% finished
-            continue;
-        }
-
+    for dyn_seg in segment_manager.segments() {
         let worker_client = client.clone();
         let worker_file = base_file.try_clone().map_err(TenunError::Io)?;
         let worker_opts = opts.clone();
-        let final_url = state.final_url.clone();
-        let counter = Arc::clone(&segment_counters[idx]);
+        let f_url = final_url.clone();
         let token = cancel_token.clone();
-        let resume_start = seg.start + seg.downloaded;
-        let etag_opt = state.etag.clone();
+        let seg_mgr = segment_manager.clone();
+        let w_limiter = limiter.clone();
+        let w_policy = policy.clone();
+        let w_etag = etag.clone();
 
         workers.spawn(async move {
-            let range_val = format!("bytes={}-{}", resume_start, seg.end);
-            let mut req = worker_client
-                .get(&final_url)
-                .header(header::RANGE, HeaderValue::from_str(&range_val).unwrap());
-
-            if let Some(ref etag) = etag_opt {
-                req = req.header(header::IF_RANGE, HeaderValue::from_str(etag).unwrap());
-            }
-
-            req = apply_options(req, &worker_opts)?;
-
-            let mut response = req
-                .send()
-                .await
-                .map_err(|e| TenunError::Network(e.to_string()))?;
-
-            let status = response.status();
-
-            if status != StatusCode::PARTIAL_CONTENT {
-                return Err(TenunError::Network(format!(
-                    "Segment {} failed to resume with HTTP status {}",
-                    seg.id, status
-                )));
-            }
-
-            let mut write_buf = Vec::with_capacity(WRITE_BUFFER_CAPACITY);
-            let mut buf_offset = resume_start;
-            let mut seg_downloaded = seg.downloaded;
-
-            while !token.is_cancelled() {
-                match response.chunk().await {
-                    Ok(Some(chunk)) => {
-                        write_buf.extend_from_slice(&chunk);
-
-                        if write_buf.len() >= WRITE_BUFFER_CAPACITY {
-                            worker_file
-                                .write_all_at(&write_buf, buf_offset)
-                                .map_err(TenunError::Io)?;
-                            buf_offset += write_buf.len() as u64;
-                            seg_downloaded += write_buf.len() as u64;
-                            counter.store(seg_downloaded, Ordering::Relaxed);
-                            write_buf.clear();
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(e) => return Err(TenunError::Network(e.to_string())),
-                }
-            }
-
-            if !write_buf.is_empty() {
-                worker_file
-                    .write_all_at(&write_buf, buf_offset)
-                    .map_err(TenunError::Io)?;
-                seg_downloaded += write_buf.len() as u64;
-                counter.store(seg_downloaded, Ordering::Relaxed);
-                write_buf.clear();
-            }
-
-            sync_file(&worker_file).map_err(TenunError::Io)?;
-
-            if token.is_cancelled() {
-                Err(TenunError::DownloadPaused)
-            } else {
-                Ok(())
-            }
+            run_worker(
+                dyn_seg,
+                worker_file,
+                worker_client,
+                worker_opts,
+                f_url,
+                token,
+                seg_mgr,
+                w_limiter,
+                w_policy,
+                min_split,
+                w_etag,
+            )
+            .await
         });
     }
 
     let mut paused = false;
+    let mut fallback_needed = false;
 
     while let Some(res) = workers.join_next().await {
         match res {
@@ -745,19 +566,24 @@ pub async fn resume_download(
                 paused = true;
                 workers.abort_all();
             }
+            Ok(Err(TenunError::RangeNotSupported)) if fallback_on_200 => {
+                fallback_needed = true;
+                workers.abort_all();
+                break;
+            }
             Ok(Err(e)) => {
                 is_running.store(false, Ordering::Relaxed);
                 let _ = checkpoint_join_handle.await;
                 return Err(e);
             }
             Err(join_err) => {
-                if paused || join_err.is_cancelled() {
+                if paused || fallback_needed || join_err.is_cancelled() {
                     continue;
                 }
                 is_running.store(false, Ordering::Relaxed);
                 let _ = checkpoint_join_handle.await;
                 return Err(TenunError::Platform(format!(
-                    "Resume worker panicked: {join_err}"
+                    "Download worker panicked: {join_err}"
                 )));
             }
         }
@@ -768,31 +594,255 @@ pub async fn resume_download(
 
     drop(base_file);
 
-    for (i, c) in segment_counters.iter().enumerate() {
-        state.segments[i].downloaded = c.load(Ordering::Relaxed);
-    }
-    state.updated_at = SystemTime::now()
+    // Save final state
+    let final_segments = segment_manager.snapshot();
+    initial_state.segments = final_segments.into_iter().map(SegmentState::from).collect();
+    initial_state.updated_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    save_state_atomic(state_path, &state)?;
+    save_state_atomic(&state_path, &initial_state)?;
 
     if paused {
         info!("Download paused at checkpoint: {}", state_path.display());
         return Err(TenunError::DownloadPaused);
     }
 
+    if fallback_needed {
+        info!("Server returned 200 OK for Range request; switching to single-stream download");
+        let _ = std::fs::remove_file(&part_path);
+        let _ = std::fs::remove_file(&state_path);
+        return download_single(original_url, dest_dir, &opts, event_tx).await;
+    }
+
+    // Atomic rename part to final
     atomic_rename_file(&part_path, &final_path)?;
-    let _ = std::fs::remove_file(state_path);
+    let _ = std::fs::remove_file(&state_path);
 
     if let Some(ref tx) = event_tx {
         let _ = tx.send(DownloadEvent::Finished {
             path: final_path.clone(),
-            total_bytes: state.total_bytes,
+            total_bytes: total_size,
         });
     }
 
     Ok(final_path)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_worker(
+    mut cur_seg: Arc<DynamicSegment>,
+    worker_file: File,
+    client: reqwest::Client,
+    opts: RequestOptions,
+    final_url: String,
+    token: CancellationToken,
+    segment_manager: SegmentManager,
+    limiter: Option<Arc<TokenBucketLimiter>>,
+    policy: RetryPolicy,
+    min_split_size: u64,
+    etag: Option<String>,
+) -> Result<()> {
+    'worker_loop: loop {
+        if token.is_cancelled() {
+            return Err(TenunError::DownloadPaused);
+        }
+
+        // If current segment is already finished, attempt to steal work
+        if cur_seg.remaining() == 0 {
+            if let Some(stolen) = segment_manager.find_and_split_largest(min_split_size) {
+                cur_seg = stolen;
+                continue 'worker_loop;
+            } else {
+                return Ok(());
+            }
+        }
+
+        let mut attempt = 0;
+
+        'segment_attempt: loop {
+            if token.is_cancelled() {
+                return Err(TenunError::DownloadPaused);
+            }
+
+            if cur_seg.remaining() == 0 {
+                break 'segment_attempt;
+            }
+
+            attempt += 1;
+            let start_offset = cur_seg.current_offset();
+            let end_offset = cur_seg.current_end();
+
+            if start_offset > end_offset {
+                break 'segment_attempt;
+            }
+
+            let range_val = format!("bytes={start_offset}-{end_offset}");
+            let mut req = client
+                .get(&final_url)
+                .header(header::RANGE, HeaderValue::from_str(&range_val).unwrap());
+
+            if let Some(ref et) = etag {
+                if let Ok(hv) = HeaderValue::from_str(et) {
+                    req = req.header(header::IF_RANGE, hv);
+                }
+            }
+
+            let req = apply_options(req, &opts)?;
+
+            let res_result = req.send().await;
+            let mut response = match res_result {
+                Ok(res) => res,
+                Err(err) => {
+                    let kind = classify_reqwest_error(&err);
+                    match kind {
+                        ErrorKind::Retryable { retry_after } => {
+                            if attempt > policy.max_retries {
+                                return Err(TenunError::Network(format!(
+                                    "Segment {} exceeded max retries: {err}",
+                                    cur_seg.id
+                                )));
+                            }
+                            let delay = policy.compute_delay(attempt, retry_after);
+                            tokio::time::sleep(delay).await;
+                            continue 'segment_attempt;
+                        }
+                        ErrorKind::NeedsRefresh => {
+                            return Err(TenunError::NeedsRefresh(err.to_string()));
+                        }
+                        ErrorKind::Fatal => {
+                            return Err(TenunError::Network(err.to_string()));
+                        }
+                    }
+                }
+            };
+
+            let status = response.status();
+            if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+                let kind = classify_response(status, response.headers());
+                if let ErrorKind::Retryable { retry_after } = kind {
+                    if attempt > policy.max_retries {
+                        return Err(TenunError::Network(format!(
+                            "Segment {} exceeded max retries on HTTP status {status}",
+                            cur_seg.id
+                        )));
+                    }
+                    let delay = policy.compute_delay(attempt, retry_after);
+                    tokio::time::sleep(delay).await;
+                    continue 'segment_attempt;
+                }
+            }
+
+            if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                return Err(TenunError::NeedsRefresh(format!("HTTP status {status}")));
+            }
+
+            if status == StatusCode::OK {
+                warn!(
+                    "Server replied 200 OK for Range request on segment {}",
+                    cur_seg.id
+                );
+                return Err(TenunError::RangeNotSupported);
+            }
+
+            if status != StatusCode::PARTIAL_CONTENT {
+                return Err(TenunError::Network(format!(
+                    "Segment {} failed with HTTP status {status}",
+                    cur_seg.id
+                )));
+            }
+
+            // Stream chunks
+            'stream_loop: loop {
+                if token.is_cancelled() {
+                    return Err(TenunError::DownloadPaused);
+                }
+
+                // Stall detection
+                let chunk_result =
+                    tokio::time::timeout(policy.stall_timeout, response.chunk()).await;
+
+                let chunk = match chunk_result {
+                    Ok(Ok(Some(c))) => c,
+                    Ok(Ok(None)) => {
+                        // End of response body
+                        break 'stream_loop;
+                    }
+                    Ok(Err(err)) => {
+                        warn!("Network chunk error on segment {}: {err}", cur_seg.id);
+                        let kind = classify_reqwest_error(&err);
+                        match kind {
+                            ErrorKind::Retryable { retry_after } => {
+                                if attempt > policy.max_retries {
+                                    return Err(TenunError::Network(format!(
+                                        "Segment {} failed chunk stream: {err}",
+                                        cur_seg.id
+                                    )));
+                                }
+                                let delay = policy.compute_delay(attempt, retry_after);
+                                tokio::time::sleep(delay).await;
+                                continue 'segment_attempt;
+                            }
+                            ErrorKind::NeedsRefresh => {
+                                return Err(TenunError::NeedsRefresh(err.to_string()));
+                            }
+                            ErrorKind::Fatal => {
+                                return Err(TenunError::Network(err.to_string()));
+                            }
+                        }
+                    }
+                    Err(_timeout) => {
+                        warn!(
+                            "Stall detected on segment {} (no data for {:?})",
+                            cur_seg.id, policy.stall_timeout
+                        );
+                        if attempt > policy.max_retries {
+                            return Err(TenunError::Network(format!(
+                                "Segment {} stalled repeatedly",
+                                cur_seg.id
+                            )));
+                        }
+                        let delay = policy.compute_delay(attempt, None);
+                        tokio::time::sleep(delay).await;
+                        continue 'segment_attempt;
+                    }
+                };
+
+                // Rate limiter throttle
+                if let Some(ref lim) = limiter {
+                    lim.acquire(chunk.len()).await;
+                }
+
+                // Write chunk
+                let (write_offset, to_write, is_end) = cur_seg.reserve_chunk(chunk.len());
+                if to_write > 0 {
+                    if let Err(io_err) = worker_file.write_all_at(&chunk[..to_write], write_offset)
+                    {
+                        cur_seg.rollback_chunk(to_write);
+                        return Err(TenunError::Io(io_err));
+                    }
+                    cur_seg.commit_chunk(to_write);
+                }
+
+                if is_end {
+                    break 'segment_attempt;
+                }
+            }
+
+            if cur_seg.remaining() == 0 {
+                break 'segment_attempt;
+            }
+        }
+
+        sync_file(&worker_file).map_err(TenunError::Io)?;
+
+        // Try to steal work
+        if let Some(stolen) = segment_manager.find_and_split_largest(min_split_size) {
+            cur_seg = stolen;
+        } else {
+            return Ok(());
+        }
+    }
 }
 
 #[cfg(test)]

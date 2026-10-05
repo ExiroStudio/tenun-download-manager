@@ -53,6 +53,34 @@ pub struct SegmentState {
     pub downloaded: u64,
 }
 
+impl From<&Segment> for SegmentState {
+    fn from(s: &Segment) -> Self {
+        Self {
+            id: s.id,
+            start: s.start,
+            end: s.end,
+            downloaded: s.downloaded,
+        }
+    }
+}
+
+impl From<Segment> for SegmentState {
+    fn from(s: Segment) -> Self {
+        Self::from(&s)
+    }
+}
+
+impl From<&SegmentState> for Segment {
+    fn from(s: &SegmentState) -> Self {
+        Self {
+            id: s.id,
+            start: s.start,
+            end: s.end,
+            downloaded: s.downloaded,
+        }
+    }
+}
+
 /// Request options safely persisted to disk without leaking raw auth credentials.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct PersistedOptions {
@@ -64,6 +92,9 @@ pub struct PersistedOptions {
     pub referer: Option<String>,
     /// Custom non-sensitive headers.
     pub custom_headers: Vec<(String, String)>,
+    /// Bandwidth rate limit in bytes per second.
+    #[serde(default)]
+    pub limit_rate: Option<u64>,
 }
 
 impl PersistedOptions {
@@ -84,6 +115,7 @@ impl PersistedOptions {
             user_agent: opts.user_agent.clone(),
             referer: opts.referer.clone(),
             custom_headers: safe_headers,
+            limit_rate: opts.limit_rate,
         }
     }
 
@@ -94,6 +126,7 @@ impl PersistedOptions {
             user_agent: self.user_agent.clone(),
             referer: self.referer.clone(),
             connections: Some(self.connections),
+            limit_rate: self.limit_rate,
             ..Default::default()
         }
     }

@@ -32,6 +32,12 @@ pub struct RequestOptions {
     pub min_segment_size: Option<u64>,
     /// Force HTTP/1.1 connections to prevent multiplexing into a single TCP stream.
     pub http1_only: bool,
+    /// Optional bandwidth rate limit in bytes per second.
+    #[serde(default)]
+    pub limit_rate: Option<u64>,
+    /// Optional retry and stall policy.
+    #[serde(default)]
+    pub retry_policy: Option<crate::retry::RetryPolicy>,
 }
 
 impl Default for RequestOptions {
@@ -47,6 +53,8 @@ impl Default for RequestOptions {
             connections: Some(crate::segment::DEFAULT_CONNECTIONS),
             min_segment_size: Some(crate::segment::DEFAULT_MIN_SEGMENT_SIZE),
             http1_only: true,
+            limit_rate: None,
+            retry_policy: None,
         }
     }
 }
@@ -140,15 +148,54 @@ pub fn apply_options(
 /// Probes a remote URL using a `GET` request with `Range: bytes=0-0` to inspect
 /// server capabilities, file size, validators, and recommended filename.
 pub async fn probe(client: &Client, url: &str, opts: &RequestOptions) -> Result<RemoteInfo> {
-    let mut req = client.get(url).header(header::RANGE, "bytes=0-0");
-    req = apply_options(req, opts)?;
+    let policy = opts.retry_policy.clone().unwrap_or_default();
+    let mut attempt = 0;
 
-    let response = req
-        .send()
-        .await
-        .map_err(|e| TenunError::Network(e.to_string()))?;
+    loop {
+        attempt += 1;
+        let mut req = client.get(url).header(header::RANGE, "bytes=0-0");
+        req = apply_options(req, opts)?;
 
-    process_probe_response(url, response).await
+        let res = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let kind = crate::retry::classify_reqwest_error(&e);
+                match kind {
+                    crate::retry::ErrorKind::Retryable { retry_after } => {
+                        if attempt > policy.max_retries {
+                            return Err(TenunError::Network(e.to_string()));
+                        }
+                        let delay = policy.compute_delay(attempt, retry_after);
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    crate::retry::ErrorKind::NeedsRefresh => {
+                        return Err(TenunError::NeedsRefresh(e.to_string()));
+                    }
+                    crate::retry::ErrorKind::Fatal => {
+                        return Err(TenunError::Network(e.to_string()));
+                    }
+                }
+            }
+        };
+
+        let status = res.status();
+        if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            let kind = crate::retry::classify_response(status, res.headers());
+            if let crate::retry::ErrorKind::Retryable { retry_after } = kind {
+                if attempt > policy.max_retries {
+                    return Err(TenunError::Network(format!(
+                        "Probe failed with HTTP status {status}"
+                    )));
+                }
+                let delay = policy.compute_delay(attempt, retry_after);
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+        }
+
+        return process_probe_response(url, res).await;
+    }
 }
 
 async fn process_probe_response(original_url: &str, response: Response) -> Result<RemoteInfo> {

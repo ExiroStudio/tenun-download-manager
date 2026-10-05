@@ -40,6 +40,14 @@ pub struct TestServerConfig {
     pub retry_after: Option<String>,
     /// Bandwidth limit per connection in bytes per second.
     pub speed_limit_bytes_per_sec: Option<u64>,
+    /// Automatically return errors for the first N requests before succeeding.
+    pub fail_first_n_requests: Option<usize>,
+    /// Drop connection abruptly after sending this many bytes.
+    pub drop_after_bytes: Option<usize>,
+    /// Stall chunk streaming for a duration after sending this many bytes.
+    pub stall_after_bytes: Option<(usize, Duration)>,
+    /// Only stall on the first data transfer request.
+    pub stall_only_first_request: bool,
     /// Number of requests received so far.
     pub request_count: usize,
 }
@@ -58,6 +66,10 @@ impl Default for TestServerConfig {
             error_status: None,
             retry_after: None,
             speed_limit_bytes_per_sec: None,
+            fail_first_n_requests: None,
+            drop_after_bytes: None,
+            stall_after_bytes: None,
+            stall_only_first_request: false,
             request_count: 0,
         }
     }
@@ -139,10 +151,26 @@ async fn handle_download(
     State(config_arc): State<Arc<RwLock<TestServerConfig>>>,
     headers: HeaderMap,
 ) -> Response {
-    let (delay, error_status, retry_after) = {
+    let (delay, error_status, retry_after, active_stall) = {
         let mut cfg = config_arc.write().expect("lock poisoned");
         cfg.request_count += 1;
-        (cfg.delay, cfg.error_status, cfg.retry_after.clone())
+        let count = cfg.request_count;
+        let should_fail = if let Some(n) = cfg.fail_first_n_requests {
+            count <= n
+        } else {
+            cfg.error_status.is_some()
+        };
+        let err = if should_fail {
+            cfg.error_status.or(Some(StatusCode::SERVICE_UNAVAILABLE))
+        } else {
+            None
+        };
+        let stall = if cfg.stall_only_first_request && count > 2 {
+            None
+        } else {
+            cfg.stall_after_bytes
+        };
+        (cfg.delay, err, cfg.retry_after.clone(), stall)
     };
 
     if let Some(d) = delay {
@@ -183,6 +211,8 @@ async fn handle_download(
             StatusCode::OK,
             cfg.data,
             cfg.speed_limit_bytes_per_sec,
+            cfg.drop_after_bytes,
+            active_stall,
         );
     }
 
@@ -205,6 +235,8 @@ async fn handle_download(
                 StatusCode::OK,
                 cfg.data,
                 cfg.speed_limit_bytes_per_sec,
+                cfg.drop_after_bytes,
+                active_stall,
             );
         }
     }
@@ -226,6 +258,8 @@ async fn handle_download(
                         StatusCode::PARTIAL_CONTENT,
                         chunk,
                         cfg.speed_limit_bytes_per_sec,
+                        cfg.drop_after_bytes,
+                        active_stall,
                     );
                 }
                 RangeResult::Unsatisfiable => {
@@ -248,6 +282,8 @@ async fn handle_download(
         StatusCode::OK,
         cfg.data,
         cfg.speed_limit_bytes_per_sec,
+        cfg.drop_after_bytes,
+        active_stall,
     )
 }
 
@@ -256,27 +292,45 @@ fn create_throttled_response(
     status: StatusCode,
     data: Vec<u8>,
     speed_limit: Option<u64>,
+    drop_after_bytes: Option<usize>,
+    stall_after_bytes: Option<(usize, Duration)>,
 ) -> Response {
-    let body = match speed_limit {
-        Some(limit) if limit > 0 => {
-            let chunk_size = 16 * 1024; // 16 KiB chunks
-            let delay_secs = (chunk_size as f64) / (limit as f64);
-            let chunk_delay = Duration::from_secs_f64(delay_secs);
+    let chunk_size = 16 * 1024; // 16 KiB chunks
+    let chunk_delay = speed_limit
+        .filter(|&lim| lim > 0)
+        .map(|lim| Duration::from_secs_f64((chunk_size as f64) / (lim as f64)));
 
-            let stream = async_stream::stream! {
-                for chunk in data.chunks(chunk_size) {
-                    yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(chunk));
-                    tokio::time::sleep(chunk_delay).await;
+    let stream = async_stream::stream! {
+        let mut sent = 0usize;
+        for chunk in data.chunks(chunk_size) {
+            if let Some(drop_limit) = drop_after_bytes {
+                if sent >= drop_limit {
+                    yield Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "simulated connection reset",
+                    ));
+                    return;
                 }
-            };
-            Body::from_stream(stream)
+            }
+
+            if let Some((stall_byte, duration)) = stall_after_bytes {
+                if sent >= stall_byte {
+                    tokio::time::sleep(duration).await;
+                }
+            }
+
+            yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(chunk));
+            sent += chunk.len();
+
+            if let Some(delay) = chunk_delay {
+                tokio::time::sleep(delay).await;
+            }
         }
-        _ => Body::from(data),
     };
 
     builder
         .status(status)
-        .body(body)
+        .body(Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 

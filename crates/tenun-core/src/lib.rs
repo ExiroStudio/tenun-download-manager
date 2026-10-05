@@ -7,23 +7,31 @@
 pub mod config;
 pub mod download;
 pub mod error;
+pub mod limiter;
 pub mod logging;
 pub mod platform;
 pub mod probe;
+pub mod retry;
 pub mod segment;
 pub mod state;
 
 pub use config::AppDirectories;
 pub use download::{
     download_segmented, download_segmented_with_cancel, download_single, resolve_unique_filename,
-    resume_download, DownloadEvent,
+    resume_download, resume_download_with_options, DownloadEvent,
 };
 pub use error::{Result, TenunError};
+pub use limiter::TokenBucketLimiter;
 pub use logging::init_logging;
 pub use platform::{atomic_rename_file, sanitize_filename, sync_file, PositionalWrite};
 pub use probe::{apply_options, build_client, probe, RemoteInfo, RequestOptions};
+pub use retry::{
+    classify_reqwest_error, classify_response, parse_retry_after, parse_retry_after_str, ErrorKind,
+    RetryPolicy,
+};
 pub use segment::{
-    calculate_segments, Segment, DEFAULT_CONNECTIONS, DEFAULT_MIN_SEGMENT_SIZE, MAX_CONNECTIONS,
+    calculate_segments, DynamicSegment, Segment, SegmentManager, DEFAULT_CONNECTIONS,
+    DEFAULT_MIN_SEGMENT_SIZE, MAX_CONNECTIONS,
 };
 pub use state::{load_state, save_state_atomic, DownloadState, SegmentState, STATE_SCHEMA_VERSION};
 pub use tokio_util::sync::CancellationToken;
