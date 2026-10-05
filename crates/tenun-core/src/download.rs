@@ -5,7 +5,7 @@ use crate::checksum::{
 };
 use crate::error::{Result, TenunError};
 use crate::limiter::TokenBucketLimiter;
-use crate::platform::{atomic_rename_file, sync_file, PositionalWrite};
+use crate::platform::{atomic_rename_file, ensure_disk_space, sync_file, PositionalWrite};
 use crate::probe::{apply_options, build_client, probe, RequestOptions};
 use crate::retry::{classify_reqwest_error, classify_response, ErrorKind, RetryPolicy};
 use crate::segment::{
@@ -204,6 +204,10 @@ pub async fn download_single(
 
     let part_path = dest_dir.join(format!("{final_filename}.part"));
 
+    if let Some(size) = remote_info.total_bytes {
+        ensure_disk_space(dest_dir, size)?;
+    }
+
     if let Some(ref tx) = event_tx {
         let _ = tx.send(DownloadEvent::Started {
             filename: final_filename.clone(),
@@ -389,6 +393,8 @@ pub async fn download_segmented_with_cancel(
 
     let part_path = dest_dir.join(format!("{final_filename}.part"));
     let state_path = dest_dir.join(format!("{final_filename}.tenun"));
+
+    ensure_disk_space(dest_dir, total_size)?;
 
     info!(
         "Preallocating {} bytes for {} ({} segments)",

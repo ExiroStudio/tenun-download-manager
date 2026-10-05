@@ -50,6 +50,11 @@ md-5 = "0.10"
 hex = "0.4"
 base64 = "0.22"
 
+# Persistence & DB
+rusqlite = { version = "0.33", features = ["bundled"] }
+uuid = { version = "1.15", features = ["v4", "serde"] }
+libc = "0.2"
+
 # Testing utilities
 tempfile = "3.16"
 proptest = { version = "1.6", default-features = false, features = ["std"] }
