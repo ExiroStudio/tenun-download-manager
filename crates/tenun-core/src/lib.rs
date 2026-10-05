@@ -15,7 +15,8 @@ pub mod state;
 
 pub use config::AppDirectories;
 pub use download::{
-    download_segmented, download_single, resolve_unique_filename, resume_download, DownloadEvent,
+    download_segmented, download_segmented_with_cancel, download_single, resolve_unique_filename,
+    resume_download, DownloadEvent,
 };
 pub use error::{Result, TenunError};
 pub use logging::init_logging;

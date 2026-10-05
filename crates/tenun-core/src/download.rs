@@ -423,6 +423,9 @@ pub async fn download_segmented_with_cancel(
                 return Err(e);
             }
             Err(join_err) => {
+                if paused || fallback_needed || join_err.is_cancelled() {
+                    continue;
+                }
                 is_running.store(false, Ordering::Relaxed);
                 let _ = checkpoint_join_handle.await;
                 return Err(TenunError::Platform(format!(
@@ -748,6 +751,9 @@ pub async fn resume_download(
                 return Err(e);
             }
             Err(join_err) => {
+                if paused || join_err.is_cancelled() {
+                    continue;
+                }
                 is_running.store(false, Ordering::Relaxed);
                 let _ = checkpoint_join_handle.await;
                 return Err(TenunError::Platform(format!(
