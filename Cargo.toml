@@ -43,6 +43,7 @@ directories = "6.0"
 
 # Testing utilities
 tempfile = "3.16"
+proptest = { version = "1.6", default-features = false, features = ["std"] }
 
 # UI
 slint = "1.18"
