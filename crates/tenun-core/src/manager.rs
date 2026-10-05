@@ -382,8 +382,15 @@ impl ManagerActor {
         // Initial queue schedule check
         self.check_queue();
 
+        let mut ticker = tokio::time::interval(Duration::from_millis(500));
+        // Discard first immediate tick
+        ticker.tick().await;
+
         loop {
             tokio::select! {
+                _ = ticker.tick() => {
+                    self.sync_active_tasks_and_queue();
+                }
                 Some(cmd) = self.cmd_rx.recv() => {
                     match cmd {
                         ManagerCommand::Add { req, reply } => {
@@ -477,11 +484,23 @@ impl ManagerActor {
         }
     }
 
-    fn handle_add(&mut self, req: AddDownloadRequest) -> Result<u64> {
-        let dest_dir = req
-            .output_dir
-            .unwrap_or_else(|| self.config.default_download_dir.clone());
+    fn sync_active_tasks_and_queue(&mut self) {
+        let mut cancelled_ids = Vec::new();
+        for (&id, task) in &self.active_tasks {
+            if let Ok(Some(rec)) = self.db.get(id) {
+                if rec.status == DownloadStatus::Paused || rec.status == DownloadStatus::Cancelled {
+                    task.cancel_token.cancel();
+                    cancelled_ids.push(id);
+                }
+            }
+        }
+        for id in cancelled_ids {
+            self.active_tasks.remove(&id);
+        }
+        self.check_queue();
+    }
 
+    fn handle_add(&mut self, req: AddDownloadRequest) -> Result<u64> {
         // Derive initial filename from URL if not specified
         let filename = req.filename.unwrap_or_else(|| {
             req.url
@@ -497,6 +516,12 @@ impl ManagerActor {
         let category = req
             .category
             .unwrap_or_else(|| FileCategory::from_filename_or_mime(&filename, None));
+
+        let dest_dir = req.output_dir.unwrap_or_else(|| {
+            self.config
+                .default_download_dir
+                .join(category.subfolder_name())
+        });
 
         let status = if req.start_now {
             DownloadStatus::Queued
@@ -615,8 +640,9 @@ impl ManagerActor {
             status: DownloadStatus::Downloading,
         });
 
+        let global_speed_limit = self.config.global_speed_limit;
         let join_handle = tokio::spawn(async move {
-            run_download_job(record, child_token, worker_tx).await;
+            run_download_job(record, child_token, worker_tx, global_speed_limit).await;
         });
 
         self.active_tasks.insert(
@@ -634,9 +660,24 @@ async fn run_download_job(
     record: DownloadRecord,
     token: CancellationToken,
     worker_tx: mpsc::Sender<WorkerMessage>,
+    global_speed_limit: Option<u64>,
 ) {
     let id = record.id;
     let dest_dir = PathBuf::from(&record.dest_dir);
+    if let Err(e) = std::fs::create_dir_all(&dest_dir) {
+        let _ = worker_tx
+            .send(WorkerMessage::Failed {
+                id,
+                error: format!(
+                    "Failed to create download directory {}: {}",
+                    dest_dir.display(),
+                    e
+                ),
+                needs_refresh: false,
+            })
+            .await;
+        return;
+    }
     let state_file = dest_dir.join(format!("{}.tenun", record.filename));
 
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<DownloadEvent>();
@@ -677,7 +718,10 @@ async fn run_download_job(
         }
     });
 
-    let opts = record.options();
+    let mut opts = record.options();
+    if opts.limit_rate.is_none() {
+        opts.limit_rate = global_speed_limit;
+    }
 
     let result = if state_file.exists() {
         debug!("Resuming existing download from {}", state_file.display());

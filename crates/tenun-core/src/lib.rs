@@ -51,3 +51,4 @@ pub use segment::{
 };
 pub use state::{load_state, save_state_atomic, DownloadState, SegmentState, STATE_SCHEMA_VERSION};
 pub use tokio_util::sync::CancellationToken;
+pub use uuid::Uuid;

@@ -155,6 +155,31 @@ pub struct NewDownloadRecord {
     pub options: RequestOptions,
 }
 
+impl NewDownloadRecord {
+    /// Creates a new download record specification with generated UUID.
+    pub fn new(
+        url: impl Into<String>,
+        filename: impl Into<String>,
+        dest_dir: impl Into<String>,
+        category: FileCategory,
+        status: DownloadStatus,
+        priority: i32,
+        options: RequestOptions,
+    ) -> Self {
+        Self {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            url: url.into(),
+            filename: filename.into(),
+            dest_dir: dest_dir.into(),
+            total_bytes: None,
+            status,
+            category,
+            priority,
+            options,
+        }
+    }
+}
+
 /// Thread-safe SQLite database manager for Tenun downloads.
 #[derive(Clone)]
 pub struct Database {
