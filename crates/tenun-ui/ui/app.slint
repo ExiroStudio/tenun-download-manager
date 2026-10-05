@@ -222,10 +222,11 @@ export component MainWindow inherits Window {
         item-id: root.selected-item.id;
         filename: root.selected-item.filename;
         status-str: root.selected-item.status-str;
-        url: root.selected-item.filename; // populated in rust
-        save-folder: root.add-folder;
+        url: root.selected-item.url;
+        save-folder: root.selected-item.dest-folder;
         size-str: root.selected-item.progress-text;
         speed-str: root.selected-item.info-text;
+        error-msg: root.selected-item.error-msg;
         is-completed: root.selected-item.is-completed;
 
         close-clicked => { root.show-detail-dialog = false; }
@@ -259,7 +260,7 @@ export component MainWindow inherits Window {
         close => { root.show-action-menu = false; }
         open-file(id) => { root.open-download(id); }
         open-folder(id) => { root.open-folder(id); }
-        copy-link(id) => { root.copy-link(root.selected-item.filename); }
+        copy-link(id) => { root.copy-link(root.selected-item.url); }
         retry-download(id) => { root.retry-download(id); }
         show-details(id) => { root.show-detail-dialog = true; }
         delete-item(id, del_file) => { root.delete-download(id, del_file); }

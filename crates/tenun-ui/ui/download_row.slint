@@ -4,10 +4,13 @@ import { IconButton, TextLinkButton, ThinProgressBar } from "common.slint";
 export struct DownloadItemData {
     id: int,
     filename: string,
+    url: string,
+    dest-folder: string,
     progress-pct: float,
     progress-text: string,
     info-text: string,
     status-str: string,
+    error-msg: string,
     is-downloading: bool,
     is-paused: bool,
     is-completed: bool,
