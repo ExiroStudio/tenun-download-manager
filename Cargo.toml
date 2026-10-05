@@ -62,3 +62,9 @@ proptest = { version = "1.6", default-features = false, features = ["std"] }
 # UI
 slint = "1.18"
 slint-build = "1.18"
+arboard = "3.4"
+rfd = "0.15"
+open = "5.3"
+notify-rust = "4.11"
+interprocess = "2.2"
+tray-icon = "0.19"
