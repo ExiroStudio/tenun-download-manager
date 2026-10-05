@@ -1,5 +1,8 @@
 //! Downloading engines: single-stream, multi-segment, and crash-resilient resumable downloads.
 
+use crate::checksum::{
+    compute_file_checksum, verify_file_checksum, ClashResolution, ExpectedChecksum,
+};
 use crate::error::{Result, TenunError};
 use crate::limiter::TokenBucketLimiter;
 use crate::platform::{atomic_rename_file, sync_file, PositionalWrite};
@@ -81,6 +84,76 @@ pub fn resolve_unique_filename(dest_dir: &Path, filename: &str) -> PathBuf {
     }
 }
 
+/// Result of destination filename and clash resolution.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ResolvedDestination {
+    /// Destination file already exists and matches expected checksum; skip downloading.
+    AlreadyExists(PathBuf),
+    /// Proceed with download to target path.
+    Proceed {
+        /// Final destination file path.
+        final_path: PathBuf,
+        /// Final filename.
+        final_filename: String,
+    },
+}
+
+/// Resolves the destination path according to the specified [`ClashResolution`] strategy.
+pub fn resolve_destination(
+    dest_dir: &Path,
+    filename: &str,
+    clash: ClashResolution,
+    expected_checksum: Option<&ExpectedChecksum>,
+) -> ResolvedDestination {
+    match clash {
+        ClashResolution::Rename => {
+            let path = resolve_unique_filename(dest_dir, filename);
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(filename)
+                .to_string();
+            ResolvedDestination::Proceed {
+                final_path: path,
+                final_filename: name,
+            }
+        }
+        ClashResolution::Overwrite => {
+            let path = dest_dir.join(filename);
+            ResolvedDestination::Proceed {
+                final_path: path,
+                final_filename: filename.to_string(),
+            }
+        }
+        ClashResolution::Deduplicate => {
+            let target = dest_dir.join(filename);
+            if target.exists() {
+                if let Some(expected) = expected_checksum {
+                    if let Ok(true) = verify_file_checksum(&target, expected) {
+                        return ResolvedDestination::AlreadyExists(target);
+                    }
+                }
+                // If checksum didn't match or no expected checksum provided, fallback to unique rename
+                let path = resolve_unique_filename(dest_dir, filename);
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(filename)
+                    .to_string();
+                ResolvedDestination::Proceed {
+                    final_path: path,
+                    final_filename: name,
+                }
+            } else {
+                ResolvedDestination::Proceed {
+                    final_path: target,
+                    final_filename: filename.to_string(),
+                }
+            }
+        }
+    }
+}
+
 /// Performs a single-stream download to `<filename>.part` and renames to the final target upon completion.
 pub async fn download_single(
     url: &str,
@@ -98,12 +171,36 @@ pub async fn download_single(
         remote_info.filename, remote_info.total_bytes
     );
 
-    let final_path = resolve_unique_filename(dest_dir, &remote_info.filename);
-    let final_filename = final_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(&remote_info.filename)
-        .to_string();
+    let effective_checksum = opts
+        .expected_checksum
+        .as_ref()
+        .or(remote_info.expected_checksum.as_ref());
+
+    let (final_path, final_filename) = match resolve_destination(
+        dest_dir,
+        &remote_info.filename,
+        opts.clash_resolution,
+        effective_checksum,
+    ) {
+        ResolvedDestination::AlreadyExists(path) => {
+            info!(
+                "File already exists with matching checksum at {}; skipping download",
+                path.display()
+            );
+            let total_bytes = path.metadata().map(|m| m.len()).unwrap_or(0);
+            if let Some(ref tx) = event_tx {
+                let _ = tx.send(DownloadEvent::Finished {
+                    path: path.clone(),
+                    total_bytes,
+                });
+            }
+            return Ok(path);
+        }
+        ResolvedDestination::Proceed {
+            final_path,
+            final_filename,
+        } => (final_path, final_filename),
+    };
 
     let part_path = dest_dir.join(format!("{final_filename}.part"));
 
@@ -182,6 +279,30 @@ pub async fn download_single(
         sync_file(&file).map_err(TenunError::Io)?;
     }
 
+    if let Some(expected) = effective_checksum {
+        info!("Verifying integrity of {}", part_path.display());
+        match verify_file_checksum(&part_path, expected) {
+            Ok(true) => {
+                info!(
+                    "Integrity verification succeeded: {} ({})",
+                    expected.hex_digest, expected.algorithm
+                );
+            }
+            Ok(false) => {
+                let actual = compute_file_checksum(&part_path, expected.algorithm)
+                    .unwrap_or_else(|_| "unknown".to_string());
+                return Err(TenunError::IntegrityMismatch(format!(
+                    "Checksum mismatch for {}: expected {} ({}), got {}",
+                    final_path.display(),
+                    expected.hex_digest,
+                    expected.algorithm,
+                    actual
+                )));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
     atomic_rename_file(&part_path, &final_path)?;
 
     if let Some(ref tx) = event_tx {
@@ -218,6 +339,37 @@ pub async fn download_segmented_with_cancel(
     info!("Probing remote resource for segmented download: {url}");
     let remote_info = probe(&client, url, opts).await?;
 
+    let effective_checksum = opts
+        .expected_checksum
+        .as_ref()
+        .or(remote_info.expected_checksum.as_ref());
+
+    let (final_path, final_filename) = match resolve_destination(
+        dest_dir,
+        &remote_info.filename,
+        opts.clash_resolution,
+        effective_checksum,
+    ) {
+        ResolvedDestination::AlreadyExists(path) => {
+            info!(
+                "File already exists with matching checksum at {}; skipping download",
+                path.display()
+            );
+            let total_bytes = path.metadata().map(|m| m.len()).unwrap_or(0);
+            if let Some(ref tx) = event_tx {
+                let _ = tx.send(DownloadEvent::Finished {
+                    path: path.clone(),
+                    total_bytes,
+                });
+            }
+            return Ok(path);
+        }
+        ResolvedDestination::Proceed {
+            final_path,
+            final_filename,
+        } => (final_path, final_filename),
+    };
+
     let total_size = match remote_info.total_bytes {
         Some(s) if s > 0 && remote_info.range_supported => s,
         _ => {
@@ -234,13 +386,6 @@ pub async fn download_segmented_with_cancel(
         info!("File size requires only 1 segment; using single stream");
         return download_single(url, dest_dir, opts, event_tx).await;
     }
-
-    let final_path = resolve_unique_filename(dest_dir, &remote_info.filename);
-    let final_filename = final_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(&remote_info.filename)
-        .to_string();
 
     let part_path = dest_dir.join(format!("{final_filename}.part"));
     let state_path = dest_dir.join(format!("{final_filename}.tenun"));
@@ -335,6 +480,9 @@ pub async fn resume_download_with_options(
     }
 
     let mut opts = state.options.to_request_options();
+    if opts.expected_checksum.is_none() {
+        opts.expected_checksum = state.expected_checksum.clone();
+    }
     if let Some(over) = opts_override {
         if over.limit_rate.is_some() {
             opts.limit_rate = over.limit_rate;
@@ -344,6 +492,12 @@ pub async fn resume_download_with_options(
         }
         if over.user_agent.is_some() {
             opts.user_agent = over.user_agent.clone();
+        }
+        if over.expected_checksum.is_some() {
+            opts.expected_checksum = over.expected_checksum.clone();
+        }
+        if over.clash_resolution != ClashResolution::default() {
+            opts.clash_resolution = over.clash_resolution;
         }
     }
 
@@ -615,6 +769,35 @@ async fn download_multi_segment(
         return download_single(original_url, dest_dir, &opts, event_tx).await;
     }
 
+    let effective_checksum = opts
+        .expected_checksum
+        .as_ref()
+        .or(initial_state.expected_checksum.as_ref());
+
+    if let Some(expected) = effective_checksum {
+        info!("Verifying integrity of {}", part_path.display());
+        match verify_file_checksum(&part_path, expected) {
+            Ok(true) => {
+                info!(
+                    "Integrity verification succeeded: {} ({})",
+                    expected.hex_digest, expected.algorithm
+                );
+            }
+            Ok(false) => {
+                let actual = compute_file_checksum(&part_path, expected.algorithm)
+                    .unwrap_or_else(|_| "unknown".to_string());
+                return Err(TenunError::IntegrityMismatch(format!(
+                    "Checksum mismatch for {}: expected {} ({}), got {}",
+                    final_path.display(),
+                    expected.hex_digest,
+                    expected.algorithm,
+                    actual
+                )));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
     // Atomic rename part to final
     atomic_rename_file(&part_path, &final_path)?;
     let _ = std::fs::remove_file(&state_path);
@@ -869,5 +1052,91 @@ mod tests {
 
         let clash2 = resolve_unique_filename(temp.path(), "file.zip");
         assert_eq!(clash2, temp.path().join("file (2).zip"));
+    }
+
+    #[test]
+    fn test_resolve_destination_strategies() {
+        let temp = tempdir().expect("temp dir");
+        let file_path = temp.path().join("archive.tar.gz");
+        let content = b"Existing file content for deduplication test";
+        std::fs::write(&file_path, content).expect("write file");
+
+        let expected_sha256 = crate::checksum::compute_file_checksum(
+            &file_path,
+            crate::checksum::ChecksumAlgorithm::Sha256,
+        )
+        .unwrap();
+        let expected =
+            ExpectedChecksum::new(crate::checksum::ChecksumAlgorithm::Sha256, &expected_sha256);
+
+        // 1. ClashResolution::Rename
+        let res_rename =
+            resolve_destination(temp.path(), "archive.tar.gz", ClashResolution::Rename, None);
+        assert_eq!(
+            res_rename,
+            ResolvedDestination::Proceed {
+                final_path: temp.path().join("archive.tar (1).gz"),
+                final_filename: "archive.tar (1).gz".to_string(),
+            }
+        );
+
+        // 2. ClashResolution::Overwrite
+        let res_overwrite = resolve_destination(
+            temp.path(),
+            "archive.tar.gz",
+            ClashResolution::Overwrite,
+            None,
+        );
+        assert_eq!(
+            res_overwrite,
+            ResolvedDestination::Proceed {
+                final_path: file_path.clone(),
+                final_filename: "archive.tar.gz".to_string(),
+            }
+        );
+
+        // 3. ClashResolution::Deduplicate - matches
+        let res_dedup_match = resolve_destination(
+            temp.path(),
+            "archive.tar.gz",
+            ClashResolution::Deduplicate,
+            Some(&expected),
+        );
+        assert_eq!(
+            res_dedup_match,
+            ResolvedDestination::AlreadyExists(file_path.clone())
+        );
+
+        // 4. ClashResolution::Deduplicate - mismatch falls back to rename
+        let wrong =
+            ExpectedChecksum::new(crate::checksum::ChecksumAlgorithm::Sha256, &"0".repeat(64));
+        let res_dedup_mismatch = resolve_destination(
+            temp.path(),
+            "archive.tar.gz",
+            ClashResolution::Deduplicate,
+            Some(&wrong),
+        );
+        assert_eq!(
+            res_dedup_mismatch,
+            ResolvedDestination::Proceed {
+                final_path: temp.path().join("archive.tar (1).gz"),
+                final_filename: "archive.tar (1).gz".to_string(),
+            }
+        );
+
+        // 5. ClashResolution::Deduplicate - non-existent file downloads directly
+        let res_dedup_new = resolve_destination(
+            temp.path(),
+            "newfile.zip",
+            ClashResolution::Deduplicate,
+            Some(&expected),
+        );
+        assert_eq!(
+            res_dedup_new,
+            ResolvedDestination::Proceed {
+                final_path: temp.path().join("newfile.zip"),
+                final_filename: "newfile.zip".to_string(),
+            }
+        );
     }
 }

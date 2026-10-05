@@ -4,6 +4,7 @@
 //! It provides robust, resilient, and multi-platform downloading capabilities
 //! including probing, segmented downloads, resuming, queuing, and data integrity verification.
 
+pub mod checksum;
 pub mod config;
 pub mod download;
 pub mod error;
@@ -15,10 +16,16 @@ pub mod retry;
 pub mod segment;
 pub mod state;
 
+pub use checksum::{
+    compute_file_checksum, extract_checksum_from_headers, parse_checksum_file,
+    parse_content_md5_header, parse_digest_header, parse_etag_checksum, verify_file_checksum,
+    ChecksumAlgorithm, ClashResolution, ExpectedChecksum,
+};
 pub use config::AppDirectories;
 pub use download::{
-    download_segmented, download_segmented_with_cancel, download_single, resolve_unique_filename,
-    resume_download, resume_download_with_options, DownloadEvent,
+    download_segmented, download_segmented_with_cancel, download_single, resolve_destination,
+    resolve_unique_filename, resume_download, resume_download_with_options, DownloadEvent,
+    ResolvedDestination,
 };
 pub use error::{Result, TenunError};
 pub use limiter::TokenBucketLimiter;

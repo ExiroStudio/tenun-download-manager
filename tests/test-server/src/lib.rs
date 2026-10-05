@@ -32,6 +32,10 @@ pub struct TestServerConfig {
     pub content_type: String,
     /// Content-Disposition header.
     pub content_disposition: Option<String>,
+    /// Optional RFC 3230 / RFC 5843 Digest header value.
+    pub digest: Option<String>,
+    /// Optional RFC 1864 Content-MD5 header value.
+    pub content_md5: Option<String>,
     /// Artificial delay to introduce before responding.
     pub delay: Option<Duration>,
     /// Artificial error status code to inject (e.g. 500, 429).
@@ -62,6 +66,8 @@ impl Default for TestServerConfig {
             last_modified: Some("Mon, 05 Oct 2026 12:00:00 GMT".to_string()),
             content_type: "application/octet-stream".to_string(),
             content_disposition: None,
+            digest: None,
+            content_md5: None,
             delay: None,
             error_status: None,
             retry_after: None,
@@ -201,6 +207,12 @@ async fn handle_download(
     }
     if let Some(ref cd) = cfg.content_disposition {
         response_builder = response_builder.header(header::CONTENT_DISPOSITION, cd);
+    }
+    if let Some(ref digest) = cfg.digest {
+        response_builder = response_builder.header("Digest", digest);
+    }
+    if let Some(ref md5) = cfg.content_md5 {
+        response_builder = response_builder.header("Content-MD5", md5);
     }
 
     if !cfg.range_enabled || cfg.force_200_for_range {

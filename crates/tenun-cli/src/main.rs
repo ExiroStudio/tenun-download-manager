@@ -1,12 +1,14 @@
 //! Tenun CLI application.
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 use tenun_core::{
-    download_segmented_with_cancel, init_logging, resume_download_with_options, AppDirectories,
-    CancellationToken, DownloadEvent, RequestOptions, TenunError,
+    compute_file_checksum, download_segmented_with_cancel, init_logging, parse_checksum_file,
+    resume_download_with_options, verify_file_checksum, AppDirectories, CancellationToken,
+    ChecksumAlgorithm, ClashResolution, DownloadEvent, ExpectedChecksum, RequestOptions,
+    TenunError,
 };
 use tokio::sync::mpsc;
 use tracing::info;
@@ -69,6 +71,28 @@ fn parse_rate_limit(s: &str) -> std::result::Result<u64, String> {
     }
 }
 
+/// Conflict resolution strategy when destination file already exists.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum ClashArg {
+    /// Appends incrementing number (file (1).ext)
+    #[default]
+    Rename,
+    /// Overwrites existing file
+    Overwrite,
+    /// Skips downloading if existing file has identical checksum
+    Deduplicate,
+}
+
+impl From<ClashArg> for ClashResolution {
+    fn from(arg: ClashArg) -> Self {
+        match arg {
+            ClashArg::Rename => ClashResolution::Rename,
+            ClashArg::Overwrite => ClashResolution::Overwrite,
+            ClashArg::Deduplicate => ClashResolution::Deduplicate,
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "tenun", version, about = "Fast and resilient download manager")]
 struct Cli {
@@ -106,6 +130,22 @@ enum Commands {
         /// Maximum bandwidth rate limit (e.g. 500K, 1M, 2MB, 1048576)
         #[arg(long, value_parser = parse_rate_limit)]
         limit_rate: Option<u64>,
+
+        /// Expected SHA-256 hash for integrity verification
+        #[arg(long)]
+        sha256: Option<String>,
+
+        /// Expected SHA-1 hash for integrity verification
+        #[arg(long)]
+        sha1: Option<String>,
+
+        /// Expected MD5 hash for integrity verification
+        #[arg(long)]
+        md5: Option<String>,
+
+        /// Collision resolution strategy when file already exists
+        #[arg(long, value_enum, default_value_t = ClashArg::Rename)]
+        clash: ClashArg,
     },
 
     /// Resume an interrupted or paused download from a .tenun state file
@@ -116,6 +156,28 @@ enum Commands {
         /// Maximum bandwidth rate limit override (e.g. 500K, 1M, 2MB)
         #[arg(long, value_parser = parse_rate_limit)]
         limit_rate: Option<u64>,
+    },
+
+    /// Verify the cryptographic checksum of a file
+    Verify {
+        /// Path to the file to verify
+        file: PathBuf,
+
+        /// Expected SHA-256 hash (64 hex characters)
+        #[arg(long)]
+        sha256: Option<String>,
+
+        /// Expected SHA-1 hash (40 hex characters)
+        #[arg(long)]
+        sha1: Option<String>,
+
+        /// Expected MD5 hash (32 hex characters)
+        #[arg(long)]
+        md5: Option<String>,
+
+        /// Path to a checksum file (e.g. SHA256SUMS or MD5SUMS)
+        #[arg(short = 'c', long)]
+        checksum_file: Option<PathBuf>,
     },
 }
 
@@ -146,6 +208,10 @@ async fn main() -> Result<()> {
             referer,
             cookie,
             limit_rate,
+            sha256,
+            sha1,
+            md5,
+            clash,
         } => {
             let dest_dir = match output {
                 Some(p) => p,
@@ -161,12 +227,23 @@ async fn main() -> Result<()> {
 
             let conn_clamped = connections.clamp(1, 32);
 
+            let expected_checksum = if let Some(ref h) = sha256 {
+                Some(ExpectedChecksum::new(ChecksumAlgorithm::Sha256, h))
+            } else if let Some(ref h) = sha1 {
+                Some(ExpectedChecksum::new(ChecksumAlgorithm::Sha1, h))
+            } else {
+                md5.as_ref()
+                    .map(|h| ExpectedChecksum::new(ChecksumAlgorithm::Md5, h))
+            };
+
             let opts = RequestOptions {
                 connections: Some(conn_clamped),
                 user_agent,
                 referer,
                 cookie,
                 limit_rate,
+                expected_checksum,
+                clash_resolution: clash.into(),
                 ..Default::default()
             };
 
@@ -328,6 +405,68 @@ async fn main() -> Result<()> {
                 Err(e) => return Err(e.into()),
             }
         }
+
+        Commands::Verify {
+            file,
+            sha256,
+            sha1,
+            md5,
+            checksum_file,
+        } => {
+            if !file.exists() {
+                anyhow::bail!("File '{}' does not exist", file.display());
+            }
+
+            let expected = if let Some(ref h) = sha256 {
+                ExpectedChecksum::new(ChecksumAlgorithm::Sha256, h)
+            } else if let Some(ref h) = sha1 {
+                ExpectedChecksum::new(ChecksumAlgorithm::Sha1, h)
+            } else if let Some(ref h) = md5 {
+                ExpectedChecksum::new(ChecksumAlgorithm::Md5, h)
+            } else if let Some(ref cf) = checksum_file {
+                if !cf.exists() {
+                    anyhow::bail!("Checksum file '{}' does not exist", cf.display());
+                }
+                let content = std::fs::read_to_string(cf)
+                    .with_context(|| format!("Failed to read checksum file: {}", cf.display()))?;
+                let filename = file
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .context("Invalid file path")?;
+                parse_checksum_file(&content, filename).with_context(|| {
+                    format!(
+                        "File entry for '{}' not found in checksum file '{}'",
+                        filename,
+                        cf.display()
+                    )
+                })?
+            } else {
+                anyhow::bail!(
+                    "No checksum specified. Provide --sha256, --sha1, --md5, or --checksum-file <PATH>"
+                );
+            };
+
+            let matches = verify_file_checksum(&file, &expected)
+                .with_context(|| format!("Failed to compute checksum for '{}'", file.display()))?;
+
+            if matches {
+                println!(
+                    "OK: {} checksum matches ({})",
+                    expected.algorithm, expected.hex_digest
+                );
+            } else {
+                let actual = compute_file_checksum(&file, expected.algorithm)
+                    .unwrap_or_else(|_| "unknown".to_string());
+                anyhow::bail!(
+                    "FAILED: Checksum mismatch for '{}'\nExpected ({}): {}\nActual   ({}): {}",
+                    file.display(),
+                    expected.algorithm,
+                    expected.hex_digest,
+                    expected.algorithm,
+                    actual
+                );
+            }
+        }
     }
 
     Ok(())
@@ -349,5 +488,79 @@ mod tests {
         assert_eq!(parse_rate_limit("1024B").unwrap(), 1024);
         assert!(parse_rate_limit("").is_err());
         assert!(parse_rate_limit("invalid").is_err());
+    }
+
+    #[test]
+    fn test_cli_clash_resolution_conversion() {
+        assert_eq!(
+            ClashResolution::from(ClashArg::Rename),
+            ClashResolution::Rename
+        );
+        assert_eq!(
+            ClashResolution::from(ClashArg::Overwrite),
+            ClashResolution::Overwrite
+        );
+        assert_eq!(
+            ClashResolution::from(ClashArg::Deduplicate),
+            ClashResolution::Deduplicate
+        );
+    }
+
+    #[test]
+    fn test_cli_get_with_checksum_and_clash() {
+        let args = [
+            "tenun",
+            "get",
+            "https://example.com/file.iso",
+            "--sha256",
+            "c4ca4238a0b923820dcc509a6f75849bc4ca4238a0b923820dcc509a6f75849b",
+            "--clash",
+            "deduplicate",
+        ];
+        let parsed = Cli::try_parse_from(args).expect("valid parse");
+        match parsed.command {
+            Commands::Get {
+                sha256, clash, url, ..
+            } => {
+                assert_eq!(url, "https://example.com/file.iso");
+                assert_eq!(
+                    sha256.as_deref(),
+                    Some("c4ca4238a0b923820dcc509a6f75849bc4ca4238a0b923820dcc509a6f75849b")
+                );
+                assert_eq!(clash, ClashArg::Deduplicate);
+            }
+            _ => panic!("Expected Commands::Get"),
+        }
+    }
+
+    #[test]
+    fn test_cli_verify_parsing() {
+        let args = [
+            "tenun",
+            "verify",
+            "sample.tar.gz",
+            "--sha256",
+            "66f44d8b9487c699faaa4687d60f5e7146522cbbcf074e6a88b502cf3c95963b",
+        ];
+        let parsed = Cli::try_parse_from(args).expect("valid parse");
+        match parsed.command {
+            Commands::Verify {
+                file,
+                sha256,
+                sha1,
+                md5,
+                checksum_file,
+            } => {
+                assert_eq!(file, PathBuf::from("sample.tar.gz"));
+                assert_eq!(
+                    sha256.as_deref(),
+                    Some("66f44d8b9487c699faaa4687d60f5e7146522cbbcf074e6a88b502cf3c95963b")
+                );
+                assert!(sha1.is_none());
+                assert!(md5.is_none());
+                assert!(checksum_file.is_none());
+            }
+            _ => panic!("Expected Commands::Verify"),
+        }
     }
 }
