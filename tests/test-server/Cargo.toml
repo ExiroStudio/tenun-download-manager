@@ -1,0 +1,16 @@
+[package]
+name = "tenun-test-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Configurable HTTP test server for Tenun integration tests"
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+bytes = "1"
+http = "1"
+
+[dev-dependencies]
+reqwest = { workspace = true }
