@@ -12,6 +12,7 @@ pub mod download;
 pub mod error;
 pub mod limiter;
 pub mod logging;
+pub mod manager;
 pub mod platform;
 pub mod probe;
 pub mod retry;
@@ -34,6 +35,7 @@ pub use download::{
 pub use error::{Result, TenunError};
 pub use limiter::TokenBucketLimiter;
 pub use logging::init_logging;
+pub use manager::{AddDownloadRequest, DownloadManager, DownloadManagerConfig, ManagerEvent};
 pub use platform::{
     atomic_rename_file, available_disk_space, ensure_disk_space, sanitize_filename, sync_file,
     PositionalWrite,
