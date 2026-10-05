@@ -2,6 +2,7 @@
 members = [
     "crates/tenun-core",
     "crates/tenun-cli",
+    "crates/tenun-ui",
 ]
 resolver = "2"
 

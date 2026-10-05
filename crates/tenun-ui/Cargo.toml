@@ -1,0 +1,16 @@
+[package]
+name = "tenun-ui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Slint desktop UI for Tenun Download Manager"
+
+[dependencies]
+tenun-core = { workspace = true }
+slint = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[build-dependencies]
+slint-build = { workspace = true }
