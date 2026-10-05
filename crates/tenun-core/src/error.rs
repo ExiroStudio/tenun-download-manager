@@ -41,6 +41,10 @@ pub enum TenunError {
     #[error("Remote file changed on server: {0}")]
     RemoteFileChanged(String),
 
+    /// Remote resource expired or requires refresh (e.g. 401 Unauthorized, 403 Forbidden).
+    #[error("Download resource expired or requires refresh: {0}")]
+    NeedsRefresh(String),
+
     /// Download operation was paused via cancellation token.
     #[error("Download was paused")]
     DownloadPaused,

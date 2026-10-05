@@ -5128,6 +5128,7 @@ name = "tenun-core"
 version = "0.1.0"
 dependencies = [
  "directories",
+ "httpdate",
  "percent-encoding",
  "proptest",
  "reqwest",
