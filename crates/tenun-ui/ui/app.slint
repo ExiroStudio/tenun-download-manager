@@ -59,9 +59,11 @@ export component MainWindow inherits Window {
     callback copy-link(string);
     callback retry-download(int);
     callback delete-download(int, bool); // id, delete_disk_file
-    callback open-folder-picker();
+    callback pick-add-folder();
+    callback pick-settings-folder();
     callback save-settings(string, string, string); // folder, concurrent, speed_limit
     callback probe-url(string);
+    callback tab-changed(int);
 
     // Root layout
     VerticalLayout {
@@ -126,6 +128,7 @@ export component MainWindow inherits Window {
 
                         tab-selected(idx) => {
                             root.active-tab = idx;
+                            root.tab-changed(idx);
                         }
                     }
 
@@ -200,7 +203,7 @@ export component MainWindow inherits Window {
         preview-info: root.add-info;
         save-folder: root.add-folder;
 
-        change-folder-clicked => { root.open-folder-picker(); }
+        change-folder-clicked => { root.pick-add-folder(); }
         cancel-clicked => { root.show-add-dialog = false; }
         url-edited(u) => { root.probe-url(u); }
 
@@ -242,7 +245,7 @@ export component MainWindow inherits Window {
         speed-limit-str: root.settings-speed-limit;
         dark-mode: Theme.is-dark;
 
-        change-default-folder => { root.open-folder-picker(); }
+        change-default-folder => { root.pick-settings-folder(); }
         cancel-clicked => { root.show-settings-dialog = false; }
         toggle-theme => { Theme.is-dark = !Theme.is-dark; }
         save-clicked => {
