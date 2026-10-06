@@ -1,5 +1,6 @@
 # Rust build artifacts
 /target/
+/dist/
 **/*.rs.bk
 
 # Tenun temporary download and state files

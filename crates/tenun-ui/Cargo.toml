@@ -24,3 +24,6 @@ tray = ["dep:tray-icon"]
 
 [build-dependencies]
 slint-build = { workspace = true }
+
+[target.'cfg(windows)'.build-dependencies]
+winres = { workspace = true }

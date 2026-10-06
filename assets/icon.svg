@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3B5BDB"/>
+      <stop offset="100%" stop-color="#1E3A8A"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#93C5FD"/>
+      <stop offset="100%" stop-color="#FFFFFF"/>
+    </linearGradient>
+    <filter id="dropShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <!-- Background Card -->
+  <rect x="16" y="16" width="224" height="224" rx="48" fill="url(#bgGrad)" filter="url(#dropShadow)"/>
+
+  <!-- Woven Warp Lines (Vertical) -->
+  <line x1="80" y1="56" x2="80" y2="200" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.25"/>
+  <line x1="128" y1="56" x2="128" y2="200" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.25"/>
+  <line x1="176" y1="56" x2="176" y2="200" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.25"/>
+
+  <!-- Woven Weft Lines (Horizontal) -->
+  <line x1="56" y1="90" x2="200" y2="90" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.25"/>
+  <line x1="56" y1="138" x2="200" y2="138" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.25"/>
+  <line x1="56" y1="186" x2="200" y2="186" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.25"/>
+
+  <!-- Center Download Arrow Motif -->
+  <g filter="url(#dropShadow)">
+    <!-- Arrow Stem -->
+    <line x1="128" y1="72" x2="128" y2="148" stroke="url(#accentGrad)" stroke-width="18" stroke-linecap="round"/>
+    
+    <!-- Arrow Head -->
+    <path d="M92 128 L128 164 L164 128" fill="none" stroke="url(#accentGrad)" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+    
+    <!-- Base Receiving Tray / Loom Beam -->
+    <path d="M84 184 L172 184" fill="none" stroke="#FFFFFF" stroke-width="14" stroke-linecap="round"/>
+  </g>
+</svg>
