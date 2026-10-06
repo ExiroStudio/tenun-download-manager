@@ -69,7 +69,7 @@ Remove-Item -Recurse -Force $ZipDir
 # Generate SHA-256 Hashes
 Write-Host "--> Computing SHA-256 Checksums..."
 $Checksums = @()
-Get-ChildItem -Path $DistDir -Filter "*.exe", "*.zip" | ForEach-Object {
+Get-ChildItem -Path $DistDir -File | Where-Object { $_.Extension -in ".exe", ".zip" } | Sort-Object Name | ForEach-Object {
     $Hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLower()
     $Checksums += "$Hash  $($_.Name)"
 }
