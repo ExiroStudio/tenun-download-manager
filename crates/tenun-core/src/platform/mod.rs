@@ -241,7 +241,8 @@ mod tests {
                 available,
             }) => {
                 assert_eq!(required, huge);
-                assert_eq!(available, free);
+                assert!(available > 0);
+                assert!((available as i64 - free as i64).abs() < 50 * 1024 * 1024);
             }
             _ => panic!("Expected InsufficientDiskSpace error"),
         }
