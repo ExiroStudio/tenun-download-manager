@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Tenun
+Comment=Fast, reliable, resilient desktop download manager
+GenericName=Download Manager
+Exec=tenun-ui %U
+Icon=tenun
+Type=Application
+Terminal=false
+StartupNotify=true
+Categories=Network;FileTransfer;
+MimeType=x-scheme-handler/http;x-scheme-handler/https;
+Keywords=download;manager;idm;network;accelerator;
