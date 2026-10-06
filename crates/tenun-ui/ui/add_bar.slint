@@ -1,0 +1,78 @@
+import { Theme } from "theme.slint";
+import { CustomInput, PrimaryButton } from "common.slint";
+
+export component AddBar inherits VerticalLayout {
+    in-out property <string> url-text <=> input.text;
+    in-out property <string> clipboard-suggestion: "";
+
+    callback submit(string);
+    callback use-suggestion(string);
+
+    spacing: 8px;
+
+    HorizontalLayout {
+        spacing: 10px;
+
+        input := CustomInput {
+            placeholder: "Paste link to download";
+            accepted(val) => {
+                if val != "" {
+                    root.submit(val);
+                }
+            }
+        }
+
+        download-btn := PrimaryButton {
+            text: "Download";
+            min-width: 110px;
+            enabled: input.text != "";
+            clicked => {
+                if input.text != "" {
+                    root.submit(input.text);
+                }
+            }
+        }
+    }
+
+    if root.clipboard-suggestion != "": HorizontalLayout {
+        padding-left: 4px;
+        spacing: 6px;
+
+        Rectangle {
+            border-radius: Theme.radius-pill;
+            background: chip-touch.has-hover ? Theme.accent-light : Theme.surface-secondary;
+            height: 26px;
+
+            animate background { duration: 150ms; }
+
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 6px;
+
+                Text {
+                    text: "📋";
+                    font-size: Theme.font-small;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: "From clipboard: " + root.clipboard-suggestion;
+                    font-size: Theme.font-caption;
+                    font-weight: 500;
+                    color: Theme.accent;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    max-width: 500px;
+                }
+            }
+
+            chip-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.use-suggestion(root.clipboard-suggestion);
+                }
+            }
+        }
+    }
+}

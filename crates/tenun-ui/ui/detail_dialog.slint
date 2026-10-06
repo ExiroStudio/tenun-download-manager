@@ -1,0 +1,143 @@
+import { Theme } from "theme.slint";
+import { PrimaryButton, SecondaryButton, TextLinkButton } from "common.slint";
+
+export component DetailDialog inherits Rectangle {
+    in-out property <int> item-id: 0;
+    in-out property <string> filename: "";
+    in-out property <string> status-str: "";
+    in-out property <string> url: "";
+    in-out property <string> save-folder: "";
+    in-out property <string> size-str: "";
+    in-out property <string> speed-str: "";
+    in-out property <string> error-msg: "";
+    in-out property <bool> is-completed: false;
+
+    callback close-clicked();
+    callback open-file-clicked(int);
+    callback open-folder-clicked(int);
+    callback copy-link-clicked(string);
+
+    background: #00000055;
+
+    TouchArea {
+        clicked => { root.close-clicked(); }
+    }
+
+    dialog-card := Rectangle {
+        width: 520px;
+        border-radius: Theme.radius-dialog;
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 24px;
+            spacing: 16px;
+
+            HorizontalLayout {
+                alignment: space-between;
+
+                Text {
+                    text: "Download details";
+                    font-size: Theme.font-title;
+                    font-weight: 700;
+                    color: Theme.text;
+                }
+
+                TextLinkButton {
+                    text: "✕";
+                    text-color: Theme.text-secondary;
+                    clicked => { root.close-clicked(); }
+                }
+            }
+
+            VerticalLayout {
+                spacing: 10px;
+
+                // File Name
+                VerticalLayout {
+                    spacing: 2px;
+                    Text { text: "File Name"; font-size: Theme.font-caption; color: Theme.text-secondary; }
+                    Text { text: root.filename; font-size: Theme.font-body; font-weight: 600; color: Theme.text; overflow: elide; }
+                }
+
+                // Status & Progress
+                HorizontalLayout {
+                    spacing: 20px;
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text { text: "Status"; font-size: Theme.font-caption; color: Theme.text-secondary; }
+                        Text { text: root.status-str; font-size: Theme.font-body; color: Theme.text; }
+                    }
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text { text: "Size"; font-size: Theme.font-caption; color: Theme.text-secondary; }
+                        Text { text: root.size-str; font-size: Theme.font-body; color: Theme.text; }
+                    }
+                }
+
+                // URL
+                VerticalLayout {
+                    spacing: 2px;
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text { text: "URL"; font-size: Theme.font-caption; color: Theme.text-secondary; }
+                        TextLinkButton {
+                            text: "Copy link";
+                            clicked => { root.copy-link-clicked(root.url); }
+                        }
+                    }
+                    Text { text: root.url; font-size: Theme.font-caption; color: Theme.text; overflow: elide; }
+                }
+
+                // Folder
+                VerticalLayout {
+                    spacing: 2px;
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text { text: "Destination"; font-size: Theme.font-caption; color: Theme.text-secondary; }
+                        TextLinkButton {
+                            text: "Open folder";
+                            clicked => { root.open-folder-clicked(root.item-id); }
+                        }
+                    }
+                    Text { text: root.save-folder; font-size: Theme.font-caption; color: Theme.text; overflow: elide; }
+                }
+
+                // Error Message if failed
+                if root.error-msg != "": Rectangle {
+                    border-radius: Theme.radius-card;
+                    background: Theme.error-light;
+                    border-width: 1px;
+                    border-color: Theme.error;
+
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 4px;
+                        Text { text: "Error"; font-size: Theme.font-caption; font-weight: 600; color: Theme.error; }
+                        Text { text: root.error-msg; font-size: Theme.font-caption; color: Theme.error; wrap: word-wrap; }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: end;
+
+                if root.is-completed: PrimaryButton {
+                    text: "Open file";
+                    min-width: 110px;
+                    clicked => { root.open-file-clicked(root.item-id); }
+                }
+
+                SecondaryButton {
+                    text: "Close";
+                    min-width: 90px;
+                    clicked => { root.close-clicked(); }
+                }
+            }
+        }
+    }
+}

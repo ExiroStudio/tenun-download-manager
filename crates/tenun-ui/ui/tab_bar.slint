@@ -1,0 +1,161 @@
+import { Theme } from "theme.slint";
+
+export component TabBar inherits VerticalLayout {
+    in-out property <int> active-tab: 0; // 0: All, 1: Downloading, 2: Completed
+    in-out property <int> count-all: 0;
+    in-out property <int> count-downloading: 0;
+    in-out property <int> count-completed: 0;
+
+    callback tab-selected(int);
+
+    spacing: 0px;
+
+    HorizontalLayout {
+        spacing: 24px;
+        alignment: start;
+
+        // Tab 0: All
+        tab0 := Rectangle {
+            min-height: 38px;
+            background: Colors.transparent;
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: center;
+
+                    Text {
+                        text: "All";
+                        font-size: Theme.font-body;
+                        font-weight: root.active-tab == 0 ? 600 : 500;
+                        color: root.active-tab == 0 ? Theme.text : Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: root.count-all;
+                        font-size: Theme.font-caption;
+                        font-weight: 500;
+                        color: Theme.text-muted;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Underline indicator
+                Rectangle {
+                    height: 2px;
+                    background: root.active-tab == 0 ? Theme.accent : Colors.transparent;
+                }
+            }
+
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.active-tab = 0;
+                    root.tab-selected(0);
+                }
+            }
+        }
+
+        // Tab 1: Downloading
+        tab1 := Rectangle {
+            min-height: 38px;
+            background: Colors.transparent;
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: center;
+
+                    Text {
+                        text: "Downloading";
+                        font-size: Theme.font-body;
+                        font-weight: root.active-tab == 1 ? 600 : 500;
+                        color: root.active-tab == 1 ? Theme.text : Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: root.count-downloading;
+                        font-size: Theme.font-caption;
+                        font-weight: 500;
+                        color: Theme.text-muted;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Underline indicator
+                Rectangle {
+                    height: 2px;
+                    background: root.active-tab == 1 ? Theme.accent : Colors.transparent;
+                }
+            }
+
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.active-tab = 1;
+                    root.tab-selected(1);
+                }
+            }
+        }
+
+        // Tab 2: Completed
+        tab2 := Rectangle {
+            min-height: 38px;
+            background: Colors.transparent;
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: center;
+
+                    Text {
+                        text: "Completed";
+                        font-size: Theme.font-body;
+                        font-weight: root.active-tab == 2 ? 600 : 500;
+                        color: root.active-tab == 2 ? Theme.text : Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: root.count-completed;
+                        font-size: Theme.font-caption;
+                        font-weight: 500;
+                        color: Theme.text-muted;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Underline indicator
+                Rectangle {
+                    height: 2px;
+                    background: root.active-tab == 2 ? Theme.accent : Colors.transparent;
+                }
+            }
+
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.active-tab = 2;
+                    root.tab-selected(2);
+                }
+            }
+        }
+    }
+
+    // Divider line under tabs
+    Rectangle {
+        height: 1px;
+        background: Theme.border;
+    }
+}

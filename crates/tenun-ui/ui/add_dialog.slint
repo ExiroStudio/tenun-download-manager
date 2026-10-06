@@ -1,0 +1,255 @@
+import { Theme } from "theme.slint";
+import { CustomInput, PrimaryButton, SecondaryButton, TextLinkButton } from "common.slint";
+
+export component AddDialog inherits Rectangle {
+    in-out property <string> url <=> url-input.text;
+    in-out property <string> preview-filename: "download";
+    in-out property <string> preview-info: "Analyzing link...";
+    in-out property <string> save-folder: "Downloads";
+    in-out property <bool> show-advanced: false;
+
+    // Advanced options
+    in-out property <string> custom-filename: "";
+    in-out property <string> connections-str: "8";
+    in-out property <string> speed-limit-str: "";
+    in-out property <string> checksum-str: "";
+
+    callback change-folder-clicked();
+    callback cancel-clicked();
+    callback start-clicked();
+    callback url-edited(string);
+
+    background: #00000055;
+
+    // Click outside to cancel
+    TouchArea {
+        clicked => { root.cancel-clicked(); }
+    }
+
+    dialog-card := Rectangle {
+        width: 520px;
+        border-radius: Theme.radius-dialog;
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        // Block clicks from bubbling up to backdrop
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 24px;
+            spacing: 16px;
+
+            // Title
+            Text {
+                text: "Add download";
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+            }
+
+            // Link section
+            VerticalLayout {
+                spacing: 6px;
+
+                Text {
+                    text: "Link";
+                    font-size: Theme.font-caption;
+                    font-weight: 500;
+                    color: Theme.text-secondary;
+                }
+
+                url-input := CustomInput {
+                    placeholder: "https://...";
+                    edited(val) => { root.url-edited(val); }
+                }
+            }
+
+            // File Preview Card
+            Rectangle {
+                border-radius: Theme.radius-card;
+                background: Theme.surface-secondary;
+                min-height: 64px;
+
+                HorizontalLayout {
+                    padding: 12px;
+                    spacing: 12px;
+                    alignment: start;
+
+                    // File icon box
+                    Rectangle {
+                        width: 40px;
+                        height: 40px;
+                        border-radius: 8px;
+                        background: Theme.surface;
+                        border-width: 1px;
+                        border-color: Theme.border;
+
+                        Text {
+                            text: "📄";
+                            font-size: 20px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+
+                        Text {
+                            text: root.preview-filename;
+                            font-size: Theme.font-body;
+                            font-weight: 600;
+                            color: Theme.text;
+                            overflow: elide;
+                            max-width: 400px;
+                        }
+
+                        Text {
+                            text: root.preview-info;
+                            font-size: Theme.font-caption;
+                            color: Theme.text-secondary;
+                            overflow: elide;
+                            max-width: 400px;
+                        }
+                    }
+                }
+            }
+
+            // Save location section
+            VerticalLayout {
+                spacing: 4px;
+
+                Text {
+                    text: "Save to";
+                    font-size: Theme.font-caption;
+                    font-weight: 500;
+                    color: Theme.text-secondary;
+                }
+
+                HorizontalLayout {
+                    alignment: space-between;
+
+                    Text {
+                        text: root.save-folder;
+                        font-size: Theme.font-body;
+                        font-weight: 500;
+                        color: Theme.text;
+                        overflow: elide;
+                        max-width: 380px;
+                        vertical-alignment: center;
+                    }
+
+                    TextLinkButton {
+                        text: "Change";
+                        clicked => { root.change-folder-clicked(); }
+                    }
+                }
+            }
+
+            // Collapsible Advanced Options
+            VerticalLayout {
+                spacing: 8px;
+
+                HorizontalLayout {
+                    alignment: start;
+
+                    TextLinkButton {
+                        text: root.show-advanced ? "▾ Advanced options" : "▸ Advanced options";
+                        text-color: Theme.text-secondary;
+                        clicked => { root.show-advanced = !root.show-advanced; }
+                    }
+                }
+
+                if root.show-advanced: VerticalLayout {
+                    spacing: 10px;
+                    padding-top: 4px;
+
+                    // Custom filename
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "File name:";
+                            font-size: Theme.font-caption;
+                            color: Theme.text-secondary;
+                            min-width: 90px;
+                            vertical-alignment: center;
+                        }
+                        CustomInput {
+                            text <=> root.custom-filename;
+                            placeholder: "Optional custom name";
+                        }
+                    }
+
+                    // Parallel connections
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "Connections:";
+                            font-size: Theme.font-caption;
+                            color: Theme.text-secondary;
+                            min-width: 90px;
+                            vertical-alignment: center;
+                        }
+                        CustomInput {
+                            text <=> root.connections-str;
+                            placeholder: "8 (1-32)";
+                        }
+                    }
+
+                    // Speed limit
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "Speed limit:";
+                            font-size: Theme.font-caption;
+                            color: Theme.text-secondary;
+                            min-width: 90px;
+                            vertical-alignment: center;
+                        }
+                        CustomInput {
+                            text <=> root.speed-limit-str;
+                            placeholder: "Unlimited (e.g. 2MB)";
+                        }
+                    }
+
+                    // Checksum
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "SHA-256 / MD5:";
+                            font-size: Theme.font-caption;
+                            color: Theme.text-secondary;
+                            min-width: 90px;
+                            vertical-alignment: center;
+                        }
+                        CustomInput {
+                            text <=> root.checksum-str;
+                            placeholder: "Expected checksum hash";
+                        }
+                    }
+                }
+            }
+
+            // Bottom action buttons
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: end;
+
+                SecondaryButton {
+                    text: "Cancel";
+                    min-width: 100px;
+                    clicked => { root.cancel-clicked(); }
+                }
+
+                PrimaryButton {
+                    text: "Start download";
+                    min-width: 140px;
+                    enabled: root.url != "";
+                    clicked => { root.start-clicked(); }
+                }
+            }
+        }
+    }
+}

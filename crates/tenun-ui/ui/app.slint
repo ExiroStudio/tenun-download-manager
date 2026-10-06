@@ -1,19 +1,271 @@
-import { Button, VerticalBox } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { IconButton } from "common.slint";
+import { AddBar } from "add_bar.slint";
+import { TabBar } from "tab_bar.slint";
+import { DownloadRow, DownloadItemData } from "download_row.slint";
+import { AddDialog } from "add_dialog.slint";
+import { DetailDialog } from "detail_dialog.slint";
+import { SettingsDialog } from "settings_dialog.slint";
+import { ActionMenu } from "action_menu.slint";
+
+export { Theme, DownloadItemData }
 
 export component MainWindow inherits Window {
-    title: "Tenun Download Manager";
-    min-width: 640px;
-    min-height: 400px;
+    title: "Tenun";
+    min-width: 480px;
+    min-height: 520px;
+    preferred-width: 820px;
+    preferred-height: 680px;
+    background: Theme.background;
 
-    VerticalBox {
-        Text {
-            text: "Tenun Download Manager";
-            font-size: 18px;
-            horizontal-alignment: center;
+    // Data models and state
+    in-out property <[DownloadItemData]> downloads: [];
+    in-out property <int> active-tab: 0; // 0: All, 1: Downloading, 2: Completed
+    in-out property <int> count-all: 0;
+    in-out property <int> count-downloading: 0;
+    in-out property <int> count-completed: 0;
+    in-out property <string> footer-text: "0 active · 0 B/s";
+    in-out property <string> clipboard-url: "";
+
+    // Dialog visibilities
+    in-out property <bool> show-add-dialog: false;
+    in-out property <bool> show-detail-dialog: false;
+    in-out property <bool> show-settings-dialog: false;
+    in-out property <bool> show-action-menu: false;
+
+    // Selected item for detail / action menu
+    in-out property <int> selected-id: 0;
+    in-out property <DownloadItemData> selected-item;
+
+    // Add dialog fields
+    in-out property <string> add-url: "";
+    in-out property <string> add-filename: "";
+    in-out property <string> add-info: "";
+    in-out property <string> add-folder: "";
+
+    // Settings fields
+    in-out property <string> settings-folder: "";
+    in-out property <string> settings-concurrent: "3";
+    in-out property <string> settings-speed-limit: "";
+
+    // Callbacks to Rust
+    callback request-add-url(string);
+    callback submit-add-download(string, string, string, string, string, string); // url, folder, custom_name, conn, speed, checksum
+    callback pause-download(int);
+    callback resume-download(int);
+    callback open-download(int);
+    callback open-folder(int);
+    callback copy-link(string);
+    callback retry-download(int);
+    callback delete-download(int, bool); // id, delete_disk_file
+    callback pick-add-folder();
+    callback pick-settings-folder();
+    callback save-settings(string, string, string); // folder, concurrent, speed_limit
+    callback probe-url(string);
+    callback tab-changed(int);
+
+    // Root layout
+    VerticalLayout {
+        alignment: start;
+
+        // Centered Content Column (max-width: 760px)
+        HorizontalLayout {
+            alignment: center;
+
+            Rectangle {
+                max-width: 760px;
+                width: 100%;
+
+                VerticalLayout {
+                    padding-left: 24px;
+                    padding-right: 24px;
+                    padding-top: 20px;
+                    padding-bottom: 16px;
+                    spacing: 16px;
+
+                    // Header
+                    HorizontalLayout {
+                        alignment: space-between;
+
+                        Text {
+                            text: "Tenun";
+                            font-size: Theme.font-title;
+                            font-weight: 700;
+                            color: Theme.text;
+                            vertical-alignment: center;
+                        }
+
+                        IconButton {
+                            text: "⚙️";
+                            icon-size: 18px;
+                            icon-color: Theme.text-secondary;
+                            clicked => {
+                                root.show-settings-dialog = true;
+                            }
+                        }
+                    }
+
+                    // Add Bar
+                    add-bar := AddBar {
+                        clipboard-suggestion: root.clipboard-url;
+
+                        submit(url) => {
+                            root.request-add-url(url);
+                        }
+
+                        use-suggestion(url) => {
+                            root.request-add-url(url);
+                        }
+                    }
+
+                    // Tab Bar
+                    tab-bar := TabBar {
+                        active-tab: root.active-tab;
+                        count-all: root.count-all;
+                        count-downloading: root.count-downloading;
+                        count-completed: root.count-completed;
+
+                        tab-selected(idx) => {
+                            root.active-tab = idx;
+                            root.tab-changed(idx);
+                        }
+                    }
+
+                    // Download List Area
+                    list-card := Rectangle {
+                        border-radius: Theme.radius-card;
+                        background: Theme.surface;
+                        min-height: 340px;
+
+                        if root.downloads.length == 0: VerticalLayout {
+                            alignment: center;
+                            spacing: 8px;
+
+                            Text {
+                                text: "No downloads yet";
+                                font-size: Theme.font-body;
+                                font-weight: 600;
+                                color: Theme.text;
+                                horizontal-alignment: center;
+                            }
+
+                            Text {
+                                text: "Paste a link above to get started.";
+                                font-size: Theme.font-caption;
+                                color: Theme.text-muted;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        if root.downloads.length > 0: ScrollView {
+                            content-width: self.width;
+
+                            VerticalLayout {
+                                spacing: 0px;
+
+                                for item in root.downloads: DownloadRow {
+                                    item: item;
+
+                                    pause-clicked(id) => { root.pause-download(id); }
+                                    resume-clicked(id) => { root.resume-download(id); }
+                                    open-clicked(id) => { root.open-download(id); }
+                                    more-clicked(id) => {
+                                        root.selected-id = id;
+                                        root.selected-item = item;
+                                        root.show-action-menu = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Footer text
+                    HorizontalLayout {
+                        alignment: start;
+
+                        Text {
+                            text: root.footer-text;
+                            font-size: Theme.font-caption;
+                            color: Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
         }
-        Text {
-            text: "Desktop UI stub (Phase 0)";
-            horizontal-alignment: center;
+    }
+
+    // Modal: Add Download Dialog
+    if root.show-add-dialog: AddDialog {
+        url: root.add-url;
+        preview-filename: root.add-filename;
+        preview-info: root.add-info;
+        save-folder: root.add-folder;
+
+        change-folder-clicked => { root.pick-add-folder(); }
+        cancel-clicked => { root.show-add-dialog = false; }
+        url-edited(u) => { root.probe-url(u); }
+
+        start-clicked => {
+            root.submit-add-download(
+                self.url,
+                self.save-folder,
+                self.custom-filename,
+                self.connections-str,
+                self.speed-limit-str,
+                self.checksum-str
+            );
+            root.show-add-dialog = false;
         }
+    }
+
+    // Modal: Detail Dialog
+    if root.show-detail-dialog: DetailDialog {
+        item-id: root.selected-item.id;
+        filename: root.selected-item.filename;
+        status-str: root.selected-item.status-str;
+        url: root.selected-item.url;
+        save-folder: root.selected-item.dest-folder;
+        size-str: root.selected-item.progress-text;
+        speed-str: root.selected-item.info-text;
+        error-msg: root.selected-item.error-msg;
+        is-completed: root.selected-item.is-completed;
+
+        close-clicked => { root.show-detail-dialog = false; }
+        open-file-clicked(id) => { root.open-download(id); }
+        open-folder-clicked(id) => { root.open-folder(id); }
+        copy-link-clicked(u) => { root.copy-link(u); }
+    }
+
+    // Modal: Settings Dialog
+    if root.show-settings-dialog: SettingsDialog {
+        default-folder: root.settings-folder;
+        concurrent-str: root.settings-concurrent;
+        speed-limit-str: root.settings-speed-limit;
+        dark-mode: Theme.is-dark;
+
+        change-default-folder => { root.pick-settings-folder(); }
+        cancel-clicked => { root.show-settings-dialog = false; }
+        toggle-theme => { Theme.is-dark = !Theme.is-dark; }
+        save-clicked => {
+            root.save-settings(self.default-folder, self.concurrent-str, self.speed-limit-str);
+            root.show-settings-dialog = false;
+        }
+    }
+
+    // Modal: Context Action Menu
+    if root.show-action-menu: ActionMenu {
+        item-id: root.selected-item.id;
+        is-completed: root.selected-item.is-completed;
+        is-failed: root.selected-item.is-failed;
+
+        close => { root.show-action-menu = false; }
+        open-file(id) => { root.open-download(id); }
+        open-folder(id) => { root.open-folder(id); }
+        copy-link(id) => { root.copy-link(root.selected-item.url); }
+        retry-download(id) => { root.retry-download(id); }
+        show-details(id) => { root.show-detail-dialog = true; }
+        delete-item(id, del_file) => { root.delete-download(id, del_file); }
     }
 }

@@ -1,0 +1,175 @@
+import { Theme } from "theme.slint";
+
+export component IconButton inherits Rectangle {
+    in-out property <string> text: "";
+    in-out property <length> icon-size: 16px;
+    in-out property <color> icon-color: Theme.text-secondary;
+    in-out property <bool> enabled: true;
+
+    callback clicked();
+
+    min-width: 36px;
+    min-height: 36px;
+    border-radius: Theme.radius-card;
+    background: touch.has-hover ? Theme.surface-secondary : Colors.transparent;
+
+    animate background { duration: 150ms; }
+
+    Text {
+        text: root.text;
+        font-size: root.icon-size;
+        font-weight: 600;
+        color: root.icon-color;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+        mouse-cursor: root.enabled ? pointer : default;
+    }
+}
+
+export component PrimaryButton inherits Rectangle {
+    in-out property <string> text: "Button";
+    in-out property <bool> enabled: true;
+
+    callback clicked();
+
+    min-height: 44px;
+    border-radius: Theme.radius-card;
+    background: !root.enabled ? Theme.border : (touch.has-hover ? Theme.accent-hover : Theme.accent);
+
+    animate background { duration: 150ms; }
+
+    Text {
+        text: root.text;
+        font-size: Theme.font-body;
+        font-weight: 600;
+        color: !root.enabled ? Theme.text-muted : Colors.white;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+        mouse-cursor: root.enabled ? pointer : default;
+    }
+}
+
+export component SecondaryButton inherits Rectangle {
+    in-out property <string> text: "Cancel";
+    in-out property <bool> enabled: true;
+
+    callback clicked();
+
+    min-height: 44px;
+    border-radius: Theme.radius-card;
+    border-width: 1px;
+    border-color: Theme.input-border;
+    background: touch.has-hover ? Theme.surface-secondary : Theme.surface;
+
+    animate background { duration: 150ms; }
+
+    Text {
+        text: root.text;
+        font-size: Theme.font-body;
+        font-weight: 500;
+        color: root.enabled ? Theme.text : Theme.text-muted;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+        mouse-cursor: root.enabled ? pointer : default;
+    }
+}
+
+export component TextLinkButton inherits Rectangle {
+    in-out property <string> text: "Action";
+    in-out property <color> text-color: Theme.accent;
+
+    callback clicked();
+
+    min-height: 28px;
+    background: Colors.transparent;
+
+    Text {
+        text: root.text;
+        font-size: Theme.font-caption;
+        font-weight: 600;
+        color: touch.has-hover ? Theme.accent-hover : root.text-color;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+        mouse-cursor: pointer;
+    }
+}
+
+export component CustomInput inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in-out property <string> placeholder: "";
+    in-out property <bool> enabled: true;
+
+    callback accepted(string);
+    callback edited(string);
+
+    min-height: 44px;
+    border-radius: Theme.radius-card;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.input-border-focus : Theme.input-border;
+    background: Theme.surface;
+
+    animate border-color { duration: 150ms; }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+
+        input := TextInput {
+            text: "";
+            font-size: Theme.font-body;
+            color: Theme.text;
+            vertical-alignment: center;
+            single-line: true;
+            enabled: root.enabled;
+
+            accepted => { root.accepted(self.text); }
+            edited => { root.edited(self.text); }
+        }
+    }
+
+    if input.text == "" && !input.has-focus: Text {
+        x: 14px;
+        text: root.placeholder;
+        font-size: Theme.font-body;
+        color: Theme.text-muted;
+        vertical-alignment: center;
+    }
+}
+
+export component ThinProgressBar inherits Rectangle {
+    in-out property <float> progress: 0.0; // 0.0 to 1.0
+    in-out property <color> fill-color: Theme.accent;
+
+    height: 4px;
+    border-radius: 2px;
+    background: Theme.border;
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        height: parent.height;
+        width: Math.min(Math.max(root.progress, 0.0), 1.0) * parent.width;
+        border-radius: 2px;
+        background: root.fill-color;
+
+        animate width { duration: 200ms; easing: ease-out; }
+    }
+}
